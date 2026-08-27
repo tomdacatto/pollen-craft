@@ -1,5 +1,7 @@
 # Pollen Craft
 
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Ftomdacatto%2Fpollen-craft)
+
 Pollen Craft is a frontend-only Infinite Craft-style game. Combine the four starting seeds (Fire, Water, Earth, and Wind) to ask the Pollinations text API for a strictly structured idea and the image API for its illustration.
 
 ## Run locally
