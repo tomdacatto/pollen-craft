@@ -108,7 +108,8 @@ function readTabKey() {
     return "";
 }
 function getKey() {
-    return keyInput.value.trim() || readTabKey();
+    const input = keyInput.value.trim();
+    return isSecretKey(input) ? input : readTabKey();
 }
 function readTextModel() {
     try {

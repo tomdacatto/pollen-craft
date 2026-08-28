@@ -139,18 +139,22 @@ test("only bounded sk_ keys are accepted", () => {
 test("text requests dedupe canonical pairs per credential without exposing keys", async () => {
     let calls = 0;
     const requestModels = [];
+    const requestBodies = [];
     const fetchMock = async (url, options) => {
         calls += 1;
         assert.equal(url, `${API_BASE}/v1/chat/completions`);
         assert.match(options.headers.Authorization, /^Bearer sk_test_/u);
         assert.equal(url.includes("sk_test"), false);
         assert.equal(options.body.includes("sk_test"), false);
-        requestModels.push(JSON.parse(options.body).model);
+        const body = JSON.parse(options.body);
+        requestModels.push(body.model);
+        requestBodies.push(body);
         await new Promise((resolve) => setTimeout(resolve, 5));
         return new Response(
             JSON.stringify({
                 choices: [
                     {
+                        finish_reason: "stop",
                         message: {
                             content: JSON.stringify({
                                 name: "Steam",
@@ -192,6 +196,58 @@ test("text requests dedupe canonical pairs per credential without exposing keys"
         "openai",
         "claude-fast",
     ]);
+    const defaultBody = requestBodies[0];
+    assert.equal(defaultBody.max_tokens, 2048);
+    assert.equal(defaultBody.reasoning_effort, "minimal");
+    assert.deepEqual(defaultBody.response_format, {
+        type: "json_schema",
+        json_schema: {
+            name: "pollen_craft_discovery",
+            strict: true,
+            schema: {
+                type: "object",
+                properties: {
+                    name: { type: "string" },
+                    description: { type: "string" },
+                },
+                required: ["name", "description"],
+                additionalProperties: false,
+            },
+        },
+    });
+    assert.equal(Object.hasOwn(requestBodies[2], "reasoning_effort"), false);
+    assert.deepEqual(
+        requestBodies[2].response_format,
+        defaultBody.response_format,
+    );
+    assert.equal(Object.hasOwn(requestBodies[3], "reasoning_effort"), false);
+    assert.deepEqual(requestBodies[3].response_format, { type: "json_object" });
+});
+
+test("truncated text responses are retryable instead of malformed JSON", async () => {
+    const client = createApiClient(
+        async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [
+                        { finish_reason: "length", message: { content: "" } },
+                    ],
+                }),
+                {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                },
+            ),
+        { timeoutMs: 1000 },
+    );
+    const pair = {
+        first: { id: "fire", name: "Fire", description: "spark" },
+        second: { id: "water", name: "Water", description: "current" },
+    };
+    await assert.rejects(
+        () => client.discoverText(pair, "sk_test_12345678"),
+        /The idea response was cut off\. Retry the idea\./u,
+    );
 });
 
 test("image requests validate content type and bounded size", async () => {

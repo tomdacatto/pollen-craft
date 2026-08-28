@@ -20,6 +20,22 @@ export const TEXT_MODELS = Object.freeze([
 export const DEFAULT_TEXT_MODEL = TEXT_MODELS[0].id;
 const TEXT_MODEL_IDS = new Set(TEXT_MODELS.map(({ id }) => id));
 const MAX_PROMPT_LENGTH = 1_400;
+const DISCOVERY_RESPONSE_FORMAT = {
+    type: "json_schema",
+    json_schema: {
+        name: "pollen_craft_discovery",
+        strict: true,
+        schema: {
+            type: "object",
+            properties: {
+                name: { type: "string" },
+                description: { type: "string" },
+            },
+            required: ["name", "description"],
+            additionalProperties: false,
+        },
+    },
+};
 
 export class ApiError extends Error {
     constructor(message, kind = "network", status = 0) {
@@ -193,7 +209,14 @@ export function createApiClient(fetchImpl = globalThis.fetch, options = {}) {
                     messages: [
                         { role: "user", content: combinationPrompt(pair) },
                     ],
-                    max_tokens: 120,
+                    max_tokens: 2048,
+                    ...(modelId === "openai-fast"
+                        ? { reasoning_effort: "minimal" }
+                        : {}),
+                    response_format:
+                        modelId === "openai-fast" || modelId === "openai"
+                            ? DISCOVERY_RESPONSE_FORMAT
+                            : { type: "json_object" },
                 }),
             },
             async (response) => {
@@ -212,7 +235,13 @@ export function createApiClient(fetchImpl = globalThis.fetch, options = {}) {
                         "parse",
                     );
                 }
-                const content = payload?.choices?.[0]?.message?.content;
+                const choice = payload?.choices?.[0];
+                if (choice?.finish_reason === "length")
+                    throw new ApiError(
+                        "The idea response was cut off. Retry the idea.",
+                        "parse",
+                    );
+                const content = choice?.message?.content;
                 if (typeof content !== "string")
                     throw new ApiError("The lab returned no idea.", "parse");
                 try {
