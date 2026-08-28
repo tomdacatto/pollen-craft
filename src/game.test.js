@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { API_BASE, createApiClient, isAppKey, MAX_IMAGE_BYTES } from "./api.js";
+import {
+    API_BASE,
+    createApiClient,
+    DEFAULT_TEXT_MODEL,
+    isSecretKey,
+    MAX_IMAGE_BYTES,
+} from "./api.js";
 import {
     canonicalPair,
     createInitialState,
@@ -123,19 +129,23 @@ test("discovery IDs encode the complete canonical pair", () => {
     assert.deepEqual(ids, ["discovery-a%2Bb-c", "discovery-a-b%2Bc"]);
 });
 
-test("only registered pk_ keys are accepted", () => {
-    assert.equal(isAppKey("pk_test_12345678"), true);
-    assert.equal(isAppKey("sk_test_12345678"), false);
-    assert.equal(isAppKey("pk_short"), false);
+test("only bounded sk_ keys are accepted", () => {
+    assert.equal(isSecretKey("sk_test_12345678"), true);
+    assert.equal(isSecretKey("pk_test_12345678"), false);
+    assert.equal(isSecretKey("sk_short"), false);
+    assert.equal(isSecretKey(`sk_${"a".repeat(178)}`), false);
 });
 
 test("text requests dedupe canonical pairs per credential without exposing keys", async () => {
     let calls = 0;
+    const requestModels = [];
     const fetchMock = async (url, options) => {
         calls += 1;
         assert.equal(url, `${API_BASE}/v1/chat/completions`);
-        assert.match(options.headers.Authorization, /^Bearer pk_test_/u);
-        assert.equal(options.body.includes("pk_test"), false);
+        assert.match(options.headers.Authorization, /^Bearer sk_test_/u);
+        assert.equal(url.includes("sk_test"), false);
+        assert.equal(options.body.includes("sk_test"), false);
+        requestModels.push(JSON.parse(options.body).model);
         await new Promise((resolve) => setTimeout(resolve, 5));
         return new Response(
             JSON.stringify({
@@ -159,15 +169,29 @@ test("text requests dedupe canonical pairs per credential without exposing keys"
     const reverse = { first: second, second: first };
     const forward = { first, second };
     await Promise.all([
-        client.discoverText(forward, "pk_test_12345678"),
-        client.discoverText(reverse, "pk_test_12345678"),
+        client.discoverText(forward, "sk_test_12345678"),
+        client.discoverText(reverse, "sk_test_12345678"),
     ]);
     assert.equal(calls, 1);
+    assert.deepEqual(requestModels, [DEFAULT_TEXT_MODEL]);
     await Promise.all([
-        client.discoverText(forward, "pk_test_abcdefgh"),
-        client.discoverText(reverse, "pk_test_abcdefgh"),
+        client.discoverText(forward, "sk_test_abcdefgh"),
+        client.discoverText(reverse, "sk_test_abcdefgh"),
     ]);
     assert.equal(calls, 2);
+    await Promise.all([
+        client.discoverText(forward, "sk_test_12345678", "openai"),
+        client.discoverText(reverse, "sk_test_12345678", "openai"),
+        client.discoverText(forward, "sk_test_12345678", "claude-fast"),
+        client.discoverText(reverse, "sk_test_12345678", "claude-fast"),
+    ]);
+    assert.equal(calls, 4);
+    assert.deepEqual(requestModels, [
+        DEFAULT_TEXT_MODEL,
+        DEFAULT_TEXT_MODEL,
+        "openai",
+        "claude-fast",
+    ]);
 });
 
 test("image requests validate content type and bounded size", async () => {
@@ -181,7 +205,7 @@ test("image requests validate content type and bounded size", async () => {
     );
     const blob = await client.generateImage(
         { name: "Steam & Sun", description: "A bright cloud." },
-        "pk_test_12345678",
+        "sk_test_12345678",
     );
     assert.equal(blob.size, 5);
     const badType = createApiClient(
@@ -196,7 +220,7 @@ test("image requests validate content type and bounded size", async () => {
         () =>
             badType.generateImage(
                 { name: "Steam", description: "A cloud." },
-                "pk_test_12345678",
+                "sk_test_12345678",
             ),
         /invalid file/u,
     );
@@ -213,7 +237,7 @@ test("image requests validate content type and bounded size", async () => {
         () =>
             oversized.generateImage(
                 { name: "Steam", description: "A cloud." },
-                "pk_test_12345678",
+                "sk_test_12345678",
             ),
         /too large/u,
     );
@@ -234,8 +258,8 @@ test("image requests dedupe by discovery and credential", async () => {
     );
     const discovery = { name: "Steam", description: "A bright cloud." };
     await Promise.all([
-        client.generateImage(discovery, "pk_test_12345678"),
-        client.generateImage({ ...discovery }, "pk_test_12345678"),
+        client.generateImage(discovery, "sk_test_12345678"),
+        client.generateImage({ ...discovery }, "sk_test_12345678"),
     ]);
     assert.equal(calls, 1);
 });
@@ -260,7 +284,7 @@ test("body reads stay bounded and respect timeout", async () => {
         second: { id: "water", name: "Water", description: "current" },
     };
     await assert.rejects(
-        () => never.discoverText(pair, "pk_test_12345678"),
+        () => never.discoverText(pair, "sk_test_12345678"),
         /too long/u,
     );
 });

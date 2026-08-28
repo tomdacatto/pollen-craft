@@ -38,9 +38,11 @@
       <form method="dialog" class="dialog-card" id="key-form">
         <button class="dialog-close" value="cancel" aria-label="Close settings" type="submit">×</button>
         <p class="inventory-kicker">Connection</p><h2 id="settings-title">Settings</h2>
-        <p class="dialog-copy">Use a registered <code>pk_</code> App Key. It stays in this browser tab only.</p>
-        <label for="api-key">Pollinations App Key</label><input id="api-key" name="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="pk_…" maxlength="180" />
-        <div class="dialog-row"><button class="primary-button" id="key-save" value="default" type="submit">Save key</button><button class="plain-button" id="forget-key" value="cancel" type="button">Forget</button></div>
+        <p class="dialog-copy">Use a Pollinations <code>sk_</code> Secret Key. It stays in this browser tab only; browser code can access it, so use a temporary or scoped key.</p>
+        <label for="api-key">Pollinations Secret Key</label><input id="api-key" name="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk_…" maxlength="180" />
+        <label for="text-model">Text model</label><select id="text-model" name="text-model"></select>
+        <p class="dialog-copy">The selected model is used for new or failed discoveries. Saved recipes stay cached.</p>
+        <div class="dialog-row"><button class="primary-button" id="settings-save" value="default" type="submit">Save settings</button><button class="plain-button" id="forget-key" value="cancel" type="button">Forget</button></div>
         <p class="key-status" id="key-status" role="status">No key added yet.</p>
       </form>
     </dialog>

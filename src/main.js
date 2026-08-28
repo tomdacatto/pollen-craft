@@ -1,4 +1,11 @@
-import { ApiError, createApiClient, isAppKey } from "./api.js";
+import {
+    ApiError,
+    createApiClient,
+    DEFAULT_TEXT_MODEL,
+    isSecretKey,
+    isTextModel,
+    TEXT_MODELS,
+} from "./api.js";
 import {
     canonicalPair,
     createInitialState,
@@ -26,6 +33,7 @@ const live = document.querySelector("#live-region");
 const keyInput = document.querySelector("#api-key");
 const keyStatus = document.querySelector("#key-status");
 const keyForm = document.querySelector("#key-form");
+const modelSelect = document.querySelector("#text-model");
 const settingsDialog = document.querySelector("#settings-dialog");
 const helpDialog = document.querySelector("#help-dialog");
 const resetButton = document.querySelector("#reset-game");
@@ -93,8 +101,7 @@ function cancelImageOperation() {
 function readTabKey() {
     try {
         const key = tabStore?.getItem("pollen-craft:key") || "";
-        if (isAppKey(key)) return key;
-        tabStore?.removeItem("pollen-craft:key");
+        if (isSecretKey(key)) return key;
     } catch {
         /* storage may be blocked */
     }
@@ -103,10 +110,36 @@ function readTabKey() {
 function getKey() {
     return keyInput.value.trim() || readTabKey();
 }
+function readTextModel() {
+    try {
+        const model = localStore?.getItem("pollen-craft:text-model") || "";
+        if (isTextModel(model)) return model;
+    } catch {
+        /* storage may be blocked */
+    }
+    return DEFAULT_TEXT_MODEL;
+}
+function getTextModel() {
+    return isTextModel(modelSelect.value)
+        ? modelSelect.value
+        : DEFAULT_TEXT_MODEL;
+}
+function textModelLabel(model) {
+    return TEXT_MODELS.find((entry) => entry.id === model)?.label ?? model;
+}
+for (const model of TEXT_MODELS) {
+    const option = document.createElement("option");
+    option.value = model.id;
+    option.textContent = model.label;
+    modelSelect.append(option);
+}
+modelSelect.value = readTextModel();
 function promptForKey() {
     openSettings();
     keyInput.focus();
-    announce("A registered pk_ App Key is required to combine ingredients.");
+    announce(
+        "A Pollinations sk_ Secret Key is required to combine ingredients.",
+    );
 }
 function itemById(id) {
     return inventoryItems(state).find((item) => item.id === id) ?? null;
@@ -177,8 +210,9 @@ function setTextBusy(next) {
 function setBusy(next) {
     busy = next;
     keyInput.disabled = next;
-    document.querySelector("#key-save").disabled = next;
+    document.querySelector("#settings-save").disabled = next;
     document.querySelector("#forget-key").disabled = next;
+    modelSelect.disabled = next;
     search.disabled = next;
     resetButton.disabled = next;
     document.querySelector("#settings-open").disabled = next;
@@ -540,6 +574,7 @@ function startCombination({
     const pairKey = canonicalPair(firstItem.id, secondItem.id);
     const cached = findDiscovery(state, pairKey);
     const key = getKey();
+    const model = getTextModel();
     if (!key && !cached) {
         promptForKey();
         return;
@@ -549,6 +584,7 @@ function startCombination({
         pairKey,
         firstItem,
         secondItem,
+        model,
         sourceIds:
             sourceIds.length === 2 && sourceIds[0] !== sourceIds[1]
                 ? [...sourceIds]
@@ -580,6 +616,7 @@ function startCombination({
                 (await api.discoverText(
                     { first: firstItem, second: secondItem },
                     key,
+                    operation.model,
                 ));
             if (operation.id !== generation) return;
             setTextBusy(false);
@@ -643,7 +680,7 @@ function startCombination({
 }
 async function loadImage(operation, key) {
     if (operation.imagePending || !operation.discovery) return;
-    if (!isAppKey(key)) {
+    if (!isSecretKey(key)) {
         promptForKey();
         return;
     }
@@ -873,9 +910,11 @@ function cancelCombination() {
 }
 function openSettings() {
     if (!busy) settingsDialog.showModal();
-    keyStatus.textContent = isAppKey(getKey())
-        ? "Key ready for this tab."
-        : "No key added yet.";
+    modelSelect.value = readTextModel();
+    const modelText = `Text model: ${textModelLabel(getTextModel())}.`;
+    keyStatus.textContent = isSecretKey(getKey())
+        ? `Key ready for this tab. ${modelText}`
+        : `No key added yet. ${modelText}`;
 }
 
 search.addEventListener("input", renderInventory);
@@ -888,25 +927,42 @@ document.querySelector("#help-open").addEventListener("click", () => {
 keyForm.addEventListener("submit", (event) => {
     if (event.submitter?.value === "cancel") return;
     event.preventDefault();
-    const key = keyInput.value.trim();
-    if (!isAppKey(key)) {
-        try {
-            tabStore?.removeItem("pollen-craft:key");
-        } catch {
-            /* storage may be blocked */
-        }
-        keyStatus.textContent = "Use a registered pk_ App Key (pk_…).";
-        announce("That is not a valid pk_ App Key.");
-        return;
-    }
+    const model = getTextModel();
     try {
-        tabStore?.setItem("pollen-craft:key", key);
+        localStore?.setItem("pollen-craft:text-model", model);
     } catch {
         /* storage may be blocked */
     }
-    keyStatus.textContent = "Key ready for this tab.";
-    settingsDialog.close();
-    announce("Key saved for this tab.");
+    const enteredKey = keyInput.value.trim();
+    if (enteredKey && !isSecretKey(enteredKey)) {
+        keyInput.value = "";
+        const existingKey = readTabKey();
+        keyStatus.textContent = existingKey
+            ? `That is not a valid sk_ Secret Key. Existing tab key kept. Text model: ${textModelLabel(model)}.`
+            : `That is not a valid sk_ Secret Key. Text model saved: ${textModelLabel(model)}.`;
+        announce("That is not a valid sk_ Secret Key. No key was changed.");
+        return;
+    }
+    if (enteredKey) {
+        try {
+            tabStore?.setItem("pollen-craft:key", enteredKey);
+        } catch {
+            /* storage may be blocked */
+        }
+        keyStatus.textContent = `Settings saved for this tab. Text model: ${textModelLabel(model)}.`;
+        settingsDialog.close();
+        announce("Settings saved for this tab.");
+        return;
+    }
+    const existingKey = readTabKey();
+    keyStatus.textContent = existingKey
+        ? `Settings saved for this tab. Key ready. Text model: ${textModelLabel(model)}.`
+        : `Text model saved: ${textModelLabel(model)}. Add a Pollinations sk_ Secret Key to generate discoveries.`;
+    announce(
+        existingKey
+            ? "Settings saved for this tab."
+            : "Text model saved. A Pollinations sk_ Secret Key is still required.",
+    );
 });
 document.querySelector("#forget-key").addEventListener("click", () => {
     keyInput.value = "";
@@ -915,7 +971,7 @@ document.querySelector("#forget-key").addEventListener("click", () => {
     } catch {
         /* storage may be blocked */
     }
-    keyStatus.textContent = "No key added yet.";
+    keyStatus.textContent = `No key added yet. Text model: ${textModelLabel(getTextModel())}.`;
 });
 document.querySelector("#result-close").addEventListener("click", closeResult);
 retryImage.addEventListener("click", () => {

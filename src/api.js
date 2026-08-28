@@ -8,7 +8,17 @@ export const API_BASE = "https://gen.pollinations.ai";
 export const REQUEST_TIMEOUT_MS = 45_000;
 export const MAX_JSON_BYTES = 64 * 1024;
 export const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
-export const APP_KEY_PATTERN = /^pk_[^\s]{8,}$/u;
+export const SECRET_KEY_PATTERN = /^sk_[^\s]{8,177}$/u;
+export const TEXT_MODELS = Object.freeze([
+    { id: "openai-fast", label: "GPT-5 Nano" },
+    { id: "openai", label: "GPT-5.4 Nano" },
+    { id: "claude-fast", label: "Claude Fast" },
+    { id: "gemini-fast", label: "Gemini Fast" },
+    { id: "deepseek", label: "DeepSeek" },
+    { id: "mistral-small-3.2", label: "Mistral Small 3.2" },
+]);
+export const DEFAULT_TEXT_MODEL = TEXT_MODELS[0].id;
+const TEXT_MODEL_IDS = new Set(TEXT_MODELS.map(({ id }) => id));
 const MAX_PROMPT_LENGTH = 1_400;
 
 export class ApiError extends Error {
@@ -20,18 +30,28 @@ export class ApiError extends Error {
     }
 }
 
-export function isAppKey(key) {
-    return typeof key === "string" && APP_KEY_PATTERN.test(key.trim());
+export function isSecretKey(key) {
+    return typeof key === "string" && SECRET_KEY_PATTERN.test(key.trim());
+}
+
+export function isTextModel(model) {
+    return typeof model === "string" && TEXT_MODEL_IDS.has(model);
 }
 
 function requireKey(key) {
     const token = typeof key === "string" ? key.trim() : "";
-    if (!isAppKey(token))
+    if (!isSecretKey(token))
         throw new ApiError(
-            "Use a registered Pollinations pk_ App Key to power the lab.",
+            "Use a Pollinations sk_ Secret Key to power the lab.",
             "auth",
         );
     return token;
+}
+
+function requireTextModel(model) {
+    if (!isTextModel(model))
+        throw new ApiError("Choose a supported text model.", "model");
+    return model;
 }
 
 async function fetchWithTimeout(fetchImpl, url, options, consume, timeoutMs) {
@@ -148,15 +168,17 @@ export function createApiClient(fetchImpl = globalThis.fetch, options = {}) {
     const inFlight = new Map();
     const inFlightImages = new Map();
     const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
-    async function discoverText(pair, key) {
+    async function discoverText(pair, key, model = DEFAULT_TEXT_MODEL) {
         const token = requireKey(key);
+        const modelId = requireTextModel(model);
         const pairKey = canonicalPair(pair.first.id, pair.second.id);
         let credentials = inFlight.get(pairKey);
         if (!credentials) {
             credentials = new Map();
             inFlight.set(pairKey, credentials);
         }
-        if (credentials.has(token)) return credentials.get(token);
+        const requestKey = `${token}\u0000${modelId}`;
+        if (credentials.has(requestKey)) return credentials.get(requestKey);
         const request = fetchWithTimeout(
             fetchImpl,
             `${API_BASE}/v1/chat/completions`,
@@ -167,7 +189,7 @@ export function createApiClient(fetchImpl = globalThis.fetch, options = {}) {
                     "Content-Type": "application/json",
                 },
                 body: JSON.stringify({
-                    model: "openai",
+                    model: modelId,
                     messages: [
                         { role: "user", content: combinationPrompt(pair) },
                     ],
@@ -210,11 +232,11 @@ export function createApiClient(fetchImpl = globalThis.fetch, options = {}) {
             },
             timeoutMs,
         );
-        credentials.set(token, request);
+        credentials.set(requestKey, request);
         try {
             return await request;
         } finally {
-            credentials.delete(token);
+            credentials.delete(requestKey);
             if (credentials.size === 0) inFlight.delete(pairKey);
         }
     }
