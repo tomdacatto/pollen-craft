@@ -52,6 +52,17 @@ export function canonicalPair(first, second) {
     return values.join("+");
 }
 
+export function rectanglesOverlap(first, second) {
+    return Boolean(
+        first &&
+            second &&
+            first.left < second.right &&
+            first.right > second.left &&
+            first.top < second.bottom &&
+            first.bottom > second.top,
+    );
+}
+
 export function pairFromKey(key) {
     const parts = String(key).split("+");
     return parts.length === 2

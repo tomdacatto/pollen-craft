@@ -13,6 +13,7 @@ import {
     gameReducer,
     inventoryItems,
     loadState,
+    rectanglesOverlap,
     SEEDS,
     STORAGE_KEY,
     saveState,
@@ -61,6 +62,7 @@ let resultReturnFocus = null;
 let resultReturnInstanceId = null;
 let activeCombination = null;
 let activeImageOperation = null;
+const imageOperations = new Map();
 let retryTextAvailable = false;
 let nextInstanceId = 0;
 let nextZIndex = 0;
@@ -76,6 +78,13 @@ function safeStorage(name) {
 function announce(message) {
     live.textContent = message;
 }
+
+function currentImageOperation() {
+    return activeImageOperation?.pairKey === activePair
+        ? activeImageOperation
+        : null;
+}
+
 const imageCache = createImageCache({
     onEvict(pairKey) {
         refreshImageVisuals(pairKey);
@@ -98,14 +107,21 @@ function handleImageFailure(
     if (!cached || cached.url !== url) return false;
     const activeOperation =
         operation ??
-        (activeImageOperation?.pairKey === pairKey &&
-        activeImageOperation.imageUrl === url
-            ? activeImageOperation
-            : null);
+        (imageOperations.get(pairKey)?.imageUrl === url
+            ? imageOperations.get(pairKey)
+            : activeImageOperation?.pairKey === pairKey &&
+                activeImageOperation.imageUrl === url
+              ? activeImageOperation
+              : null);
     clearImageTimer(activeOperation);
-    if (activeImageOperation === activeOperation) {
+    if (activeOperation) {
         activeOperation.imagePending = false;
-        activeImageOperation = null;
+        activeOperation.imageDisplayed = false;
+        activeOperation.imageError = true;
+        if (imageOperations.get(pairKey) === activeOperation)
+            imageOperations.delete(pairKey);
+        if (activeImageOperation === activeOperation)
+            activeImageOperation = null;
     }
     const popoverImage =
         !resultPopover.hidden &&
@@ -131,6 +147,19 @@ function handleImageFailure(
     );
     return true;
 }
+
+function completeImageOperation(pairKey, url) {
+    const operation = imageOperations.get(pairKey);
+    if (!operation || operation.imageUrl !== url || operation.cancelled)
+        return null;
+    clearImageTimer(operation);
+    operation.imagePending = false;
+    operation.imageDisplayed = true;
+    imageOperations.delete(pairKey);
+    if (activeImageOperation === operation) activeImageOperation = null;
+    updateRetryButtons();
+    return operation;
+}
 function clearImageTimer(operation) {
     if (!operation?.imageTimer) return;
     clearTimeout(operation.imageTimer);
@@ -149,9 +178,13 @@ function positionResult(x, y) {
     resultPopover.style.left = `${Math.max(minLeft, Math.min(canvasRect.left + x + 90, maxLeft))}px`;
     resultPopover.style.top = `${Math.max(minTop, Math.min(canvasRect.top + y + 90, maxTop))}px`;
 }
-function cancelImageOperation() {
-    clearImageTimer(activeImageOperation);
-    if (activeImageOperation) activeImageOperation.imagePending = false;
+function cancelAllImageOperations() {
+    for (const operation of imageOperations.values()) {
+        operation.cancelled = true;
+        operation.imagePending = false;
+        clearImageTimer(operation);
+    }
+    imageOperations.clear();
     activeImageOperation = null;
 }
 function readTabKey() {
@@ -215,7 +248,20 @@ function imageElement(url, pairKey) {
     image.alt = "";
     image.setAttribute("aria-hidden", "true");
     image.decoding = "async";
-    image.loading = "lazy";
+    image.loading = "eager";
+    image.addEventListener(
+        "load",
+        () => {
+            if (imageCache.peek(pairKey)?.url !== url) return;
+            image
+                .closest(".element-visual")
+                ?.classList.remove("is-placeholder");
+            const operation = completeImageOperation(pairKey, url);
+            if (operation && resultPopover.hidden)
+                announce(`${operation.discovery.name} illustration ready.`);
+        },
+        { once: true },
+    );
     image.addEventListener("error", () => handleImageFailure(pairKey, url), {
         once: true,
     });
@@ -296,7 +342,9 @@ function findOpenPlacement(item, preferredX, preferredY) {
 function updateRetryButtons() {
     retryText.disabled = busy || !retryTextAvailable;
     retryImage.disabled =
-        busy || activeImageOperation?.imagePending === true || !activeDiscovery;
+        busy ||
+        currentImageOperation()?.imagePending === true ||
+        !activeDiscovery;
 }
 function setTextBusy(next) {
     canvas.setAttribute("aria-busy", String(next));
@@ -437,7 +485,6 @@ function renderInventory() {
 function placeFromInventory(item, x = null, y = null) {
     if (busy) return;
     generation += 1;
-    cancelImageOperation();
     retryTextAvailable = false;
     resultPopover.setAttribute("aria-busy", "false");
     resultPopover.hidden = true;
@@ -446,9 +493,11 @@ function placeFromInventory(item, x = null, y = null) {
     if (item.discovered) {
         activePair = item.pair;
         activeDiscovery = findDiscovery(state, item.pair);
+        activeImageOperation = imageOperations.get(item.pair) ?? null;
     } else {
         activePair = null;
         activeDiscovery = null;
+        activeImageOperation = null;
     }
     const offset = instances.size;
     const preferredX = x ?? 40 + (offset % 5) * 120;
@@ -458,42 +507,162 @@ function placeFromInventory(item, x = null, y = null) {
     announce(`${item.name} placed on the canvas.`);
     instance && renderInventory();
     if (item.discovered)
-        openResult(activeDiscovery, instance.x, instance.y, "In your book");
+        openResult(
+            activeDiscovery,
+            instance.x,
+            instance.y,
+            "In your book",
+            null,
+            false,
+            true,
+            activeImageOperation,
+        );
 }
+
+function isMobileLayout() {
+    return globalThis.matchMedia?.("(max-width: 760px)").matches ?? false;
+}
+
+function createInventoryDragGhost(item) {
+    const ghost = document.createElement("div");
+    ghost.className = "inventory-drag-ghost";
+    ghost.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = item.name;
+    ghost.append(createElementVisual(item), label);
+    document.body.append(ghost);
+    return ghost;
+}
+
+function moveInventoryDragGhost(ghost, event) {
+    ghost.style.left = `${event.clientX}px`;
+    ghost.style.top = `${event.clientY}px`;
+}
+
+function findCollisionAt(clientX, clientY, width, height) {
+    const canvasRect = canvas.getBoundingClientRect();
+    if (
+        clientX < canvasRect.left ||
+        clientX > canvasRect.right ||
+        clientY < canvasRect.top ||
+        clientY > canvasRect.bottom
+    )
+        return null;
+    const source = {
+        left: clientX - width / 2,
+        right: clientX + width / 2,
+        top: clientY - height / 2,
+        bottom: clientY + height / 2,
+    };
+    let best = null;
+    let bestDistance = Infinity;
+    let bestOrder = Infinity;
+    let order = 0;
+    for (const other of instances.values()) {
+        const target = canvasItems
+            .querySelector(`[data-instance="${other.id}"]`)
+            ?.getBoundingClientRect();
+        if (target && rectanglesOverlap(source, target)) {
+            const targetCenter = {
+                x: (target.left + target.right) / 2,
+                y: (target.top + target.bottom) / 2,
+            };
+            const distance =
+                (clientX - targetCenter.x) ** 2 +
+                (clientY - targetCenter.y) ** 2;
+            const isBetter =
+                !best ||
+                other.zIndex > best.zIndex ||
+                (other.zIndex === best.zIndex &&
+                    (distance < bestDistance ||
+                        (distance === bestDistance && order < bestOrder)));
+            if (isBetter) {
+                best = other;
+                bestDistance = distance;
+                bestOrder = order;
+            }
+        }
+        order += 1;
+    }
+    return best;
+}
+
+function cleanupDragGhost(ghost) {
+    ghost?.remove();
+}
+
 function startInventoryDrag(event, item) {
     if (busy || inventoryDrag) return;
     const chip = event.currentTarget;
     chip.setPointerCapture(event.pointerId);
-    inventoryDrag = {
+    const current = {
         item,
         chip,
         pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
         moved: false,
+        ghost: null,
     };
+    inventoryDrag = current;
     chip.addEventListener("pointermove", moveInventoryDrag);
     chip.addEventListener("pointerup", endInventoryDrag);
     chip.addEventListener("pointercancel", endInventoryDrag);
-    function moveInventoryDrag(move) {
-        if (!inventoryDrag || inventoryDrag.chip !== chip) return;
-        if (
-            Math.abs(move.clientX - inventoryDrag.startX) +
-                Math.abs(move.clientY - inventoryDrag.startY) >
-            4
-        )
-            inventoryDrag.moved = true;
-    }
-    function endInventoryDrag(end) {
-        if (!inventoryDrag || inventoryDrag.chip !== chip) return;
-        const current = inventoryDrag;
-        inventoryDrag = null;
+    chip.addEventListener("lostpointercapture", endInventoryDrag);
+    current.cleanup = () => {
         chip.removeEventListener("pointermove", moveInventoryDrag);
         chip.removeEventListener("pointerup", endInventoryDrag);
         chip.removeEventListener("pointercancel", endInventoryDrag);
+        chip.removeEventListener("lostpointercapture", endInventoryDrag);
+        cleanupDragGhost(current.ghost);
+        current.ghost = null;
+        setDropTarget(null);
         if (chip.hasPointerCapture?.(current.pointerId))
             chip.releasePointerCapture(current.pointerId);
-        if (!current.moved) return;
+    };
+    function moveInventoryDrag(move) {
+        if (!inventoryDrag || inventoryDrag !== current) return;
+        const dx = move.clientX - current.startX;
+        const dy = move.clientY - current.startY;
+        if (!current.moved) {
+            const primaryDistance = isMobileLayout()
+                ? Math.abs(dy)
+                : Math.abs(dx);
+            const crossDistance = isMobileLayout()
+                ? Math.abs(dx)
+                : Math.abs(dy);
+            if (primaryDistance <= 4 || primaryDistance < crossDistance) return;
+            current.moved = true;
+            current.ghost = createInventoryDragGhost(item);
+            chip.classList.add("is-dragging");
+        }
+        moveInventoryDragGhost(current.ghost, move);
+        setDropTarget(
+            findCollisionAt(
+                move.clientX,
+                move.clientY,
+                current.ghost.offsetWidth,
+                current.ghost.offsetHeight,
+            ),
+        );
+        move.preventDefault?.();
+    }
+    function endInventoryDrag(end) {
+        if (!inventoryDrag || inventoryDrag !== current || current.ended)
+            return;
+        current.ended = true;
+        inventoryDrag = null;
+        const dropTarget = current.moved
+            ? findCollisionAt(
+                  end.clientX,
+                  end.clientY,
+                  current.ghost?.offsetWidth ?? chip.offsetWidth,
+                  current.ghost?.offsetHeight ?? chip.offsetHeight,
+              )
+            : null;
+        current.cleanup();
+        chip.classList.remove("is-dragging");
+        if (!current.moved || end.type !== "pointerup") return;
         suppressInventoryClick = end.type === "pointerup";
         suppressInventoryChip = suppressInventoryClick ? chip : null;
         if (suppressInventoryClick) {
@@ -511,13 +680,25 @@ function startInventoryDrag(event, item) {
             end.clientY >= rect.top &&
             end.clientY <= rect.bottom
         ) {
-            placeFromInventory(
+            const instance = createInstance(
                 current.item,
                 end.clientX - rect.left - 22,
                 end.clientY - rect.top - 22,
+                true,
             );
+            renderInventory();
+            if (dropTarget) combineInstances(instance, dropTarget);
+            else announce(`${current.item.name} placed on the canvas.`);
         }
     }
+    current.cancel = () => {
+        if (!inventoryDrag || inventoryDrag !== current || current.ended)
+            return;
+        current.ended = true;
+        inventoryDrag = null;
+        current.cleanup();
+        chip.classList.remove("is-dragging");
+    };
 }
 function startDrag(event, id) {
     if (busy || drag) return;
@@ -530,7 +711,7 @@ function startDrag(event, id) {
     chip.setPointerCapture(event.pointerId);
     const canvasRect = canvas.getBoundingClientRect();
     const chipRect = chip.getBoundingClientRect();
-    drag = {
+    const current = {
         id,
         pointerId: event.pointerId,
         offsetX: event.clientX - chipRect.left,
@@ -539,11 +720,23 @@ function startDrag(event, id) {
         canvasTop: canvasRect.top,
         moved: false,
     };
+    drag = current;
     chip.addEventListener("pointermove", moveDrag);
     chip.addEventListener("pointerup", endDrag);
     chip.addEventListener("pointercancel", endDrag);
+    chip.addEventListener("lostpointercapture", endDrag);
+    current.cleanup = () => {
+        chip.removeEventListener("pointermove", moveDrag);
+        chip.removeEventListener("pointerup", endDrag);
+        chip.removeEventListener("pointercancel", endDrag);
+        chip.removeEventListener("lostpointercapture", endDrag);
+        chip.classList.remove("is-dragging");
+        setDropTarget(null);
+        if (chip.hasPointerCapture?.(current.pointerId))
+            chip.releasePointerCapture(current.pointerId);
+    };
     function moveDrag(move) {
-        if (!drag || drag.id !== id) return;
+        if (!drag || drag !== current) return;
         if (
             Math.abs(move.clientX - event.clientX) +
                 Math.abs(move.clientY - event.clientY) >
@@ -563,24 +756,21 @@ function startDrag(event, id) {
         setDropTarget(drag.moved ? findCollision(instance) : null);
     }
     function endDrag(end) {
-        if (!drag || drag.id !== id || drag.ended) return;
-        const current = drag;
+        if (!drag || drag !== current || current.ended) return;
         current.ended = true;
         drag = null;
-        chip.removeEventListener("pointermove", moveDrag);
-        chip.removeEventListener("pointerup", endDrag);
-        chip.removeEventListener("pointercancel", endDrag);
-        chip.removeEventListener("lostpointercapture", endDrag);
-        chip.classList.remove("is-dragging");
-        setDropTarget(null);
-        if (chip.hasPointerCapture?.(current.pointerId))
-            chip.releasePointerCapture(current.pointerId);
-        if (end.type !== "pointerup") return;
         const other = current.moved ? findCollision(instance) : null;
+        current.cleanup();
+        if (end.type !== "pointerup") return;
         if (other) combineInstances(instance, other);
         else if (!current.moved) activateInstance(id);
     }
-    chip.addEventListener("lostpointercapture", endDrag);
+    current.cancel = () => {
+        if (!drag || drag !== current || current.ended) return;
+        current.ended = true;
+        drag = null;
+        current.cleanup();
+    };
 }
 function setDropTarget(target) {
     for (const chip of canvasItems.querySelectorAll(".is-drop-target"))
@@ -590,6 +780,17 @@ function setDropTarget(target) {
             .querySelector(`[data-instance="${target.id}"]`)
             ?.classList.add("is-drop-target");
 }
+
+function cancelActiveDrags() {
+    inventoryDrag?.cancel?.();
+    drag?.cancel?.();
+    setDropTarget(null);
+    clearTimeout(inventoryClickReset);
+    inventoryClickReset = null;
+    suppressInventoryClick = false;
+    suppressInventoryChip = null;
+}
+
 function findCollision(instance) {
     const source = canvasItems
         .querySelector(`[data-instance="${instance.id}"]`)
@@ -608,13 +809,7 @@ function findCollision(instance) {
         const target = canvasItems
             .querySelector(`[data-instance="${other.id}"]`)
             ?.getBoundingClientRect();
-        if (
-            target &&
-            source.left < target.right &&
-            source.right > target.left &&
-            source.top < target.bottom &&
-            source.bottom > target.top
-        ) {
+        if (target && rectanglesOverlap(source, target)) {
             const targetCenter = {
                 x: (target.left + target.right) / 2,
                 y: (target.top + target.bottom) / 2,
@@ -643,12 +838,12 @@ function findCollision(instance) {
 function activateInstance(id) {
     if (busy) return;
     generation += 1;
-    cancelImageOperation();
     resultPopover.hidden = true;
     resultPopover.setAttribute("aria-busy", "false");
     resultAnchor = null;
     activePair = null;
     activeDiscovery = null;
+    activeImageOperation = null;
     selected = selected.includes(id)
         ? selected.filter((value) => value !== id)
         : selected.length === 1
@@ -662,11 +857,17 @@ function activateInstance(id) {
         combineInstances(first, second);
     }
 }
+function clearSelectionForCombination() {
+    if (!selected.length) return;
+    selected = [];
+    renderCanvas();
+}
 function combineInstances(first, second) {
     if (busy || !first || !second || first.id === second.id) return;
     const firstItem = itemById(first.itemId);
     const secondItem = itemById(second.itemId);
     if (!firstItem || !secondItem) return;
+    clearSelectionForCombination();
     startCombination({
         firstItem,
         secondItem,
@@ -676,7 +877,11 @@ function combineInstances(first, second) {
     });
 }
 function failImageDecode(operation) {
-    if (operation.id !== generation || activeImageOperation !== operation)
+    if (
+        operation.cancelled ||
+        operation.imagePending !== true ||
+        imageOperations.get(operation.pairKey) !== operation
+    )
         return;
     handleImageFailure(operation.pairKey, operation.imageUrl, operation);
 }
@@ -717,10 +922,10 @@ function startCombination({
         returnFocusInstanceId,
     };
     activeCombination = operation;
-    cancelImageOperation();
     retryTextAvailable = false;
     activePair = pairKey;
     activeDiscovery = operation.discovery;
+    activeImageOperation = imageOperations.get(pairKey) ?? null;
     resultPopover.hidden = true;
     resultPopover.setAttribute("aria-busy", "false");
     resultAnchor = null;
@@ -771,16 +976,22 @@ function startCombination({
             setBusy(false);
             renderCanvas(resultInstance.id);
             const cachedImage = imageCache.get(pairKey);
-            openResult(
-                operation.discovery,
-                operation.x,
-                operation.y,
-                cached ? "In your book" : "New discovery",
-                cachedImage?.url ?? null,
-                false,
-                false,
+            if (cached)
+                openResult(
+                    operation.discovery,
+                    operation.x,
+                    operation.y,
+                    "In your book",
+                    cachedImage?.url ?? null,
+                    false,
+                    false,
+                    imageOperations.get(pairKey) ?? null,
+                );
+            announce(
+                cached
+                    ? `${operation.discovery.name} is ready from your book.`
+                    : `${operation.discovery.name} discovered and added to your book.`,
             );
-            announce(`${operation.discovery.name} discovered.`);
             stage = "image";
             if (key && !cachedImage) loadImage(operation, key);
         } catch (error) {
@@ -800,72 +1011,98 @@ function startCombination({
     })();
 }
 async function loadImage(operation, key) {
-    if (operation.imagePending || !operation.discovery) return;
+    if (operation.imagePending || !operation.discovery || operation.cancelled)
+        return;
     if (!isSecretKey(key)) {
-        promptForKey();
+        if (activePair === operation.pairKey) promptForKey();
+        return;
+    }
+    const pending = imageOperations.get(operation.pairKey);
+    if (pending?.imagePending) {
+        if (activePair === operation.pairKey) activeImageOperation = pending;
+        updateRetryButtons();
         return;
     }
     const cached = imageCache.get(operation.pairKey);
     if (cached) {
+        operation.imageUrl = cached.url;
         operation.imageDisplayed = true;
         operation.imagePending = false;
-        openResult(
-            operation.discovery,
-            operation.x,
-            operation.y,
-            "Illustrated",
-            cached.url,
-            false,
-            false,
-        );
+        refreshImageVisuals(operation.pairKey);
+        if (!resultPopover.hidden && activePair === operation.pairKey)
+            openResult(
+                operation.discovery,
+                operation.x,
+                operation.y,
+                "Illustrated",
+                cached.url,
+                false,
+                false,
+                null,
+            );
+        updateRetryButtons();
         return;
     }
     operation.imagePending = true;
-    activeImageOperation = operation;
-    resultPopover.setAttribute("aria-busy", "true");
+    operation.imageDisplayed = false;
+    operation.imageError = false;
+    imageOperations.set(operation.pairKey, operation);
+    if (activePair === operation.pairKey) {
+        activeImageOperation = operation;
+        resultPopover.setAttribute("aria-busy", "true");
+    }
     updateRetryButtons();
     try {
         const blob = await api.generateImage(operation.discovery, key);
-        if (operation.id !== generation) return;
+        if (
+            operation.cancelled ||
+            imageOperations.get(operation.pairKey) !== operation
+        )
+            return;
         const imageUrl = imageCache.set(operation.pairKey, blob);
         operation.imageUrl = imageUrl;
         refreshImageVisuals(operation.pairKey);
-        operation.imageDisplayed = true;
-        openResult(
-            operation.discovery,
-            operation.x,
-            operation.y,
-            "Illustrated",
-            imageUrl,
-            false,
-            false,
-            operation,
-        );
-        if (operation.imagePending)
-            operation.imageTimer = setTimeout(
-                () => failImageDecode(operation),
-                IMAGE_DECODE_TIMEOUT_MS,
-            );
-    } catch (error) {
-        if (operation.id === generation)
-            openError(
-                error,
-                "image",
+        if (!resultPopover.hidden && activePair === operation.pairKey)
+            openResult(
+                operation.discovery,
                 operation.x,
                 operation.y,
-                operation.discovery,
+                "Illustrated",
+                imageUrl,
+                false,
+                false,
+                operation,
             );
-    } finally {
-        if (!operation.imageDisplayed || operation.id !== generation) {
-            operation.imagePending = false;
+        operation.imageTimer = setTimeout(
+            () => failImageDecode(operation),
+            IMAGE_DECODE_TIMEOUT_MS,
+        );
+    } catch (error) {
+        if (!operation.cancelled) {
+            operation.imageError = true;
+            if (!resultPopover.hidden && activePair === operation.pairKey)
+                openError(
+                    error,
+                    "image",
+                    operation.x,
+                    operation.y,
+                    operation.discovery,
+                );
+            else
+                announce(
+                    `${operation.discovery.name} illustration unavailable. Open it to retry the image.`,
+                );
         }
-        if (
-            activeImageOperation === operation &&
-            (!operation.imageDisplayed || operation.id !== generation)
-        ) {
+    } finally {
+        if (operation.cancelled || !operation.imageUrl) {
             operation.imagePending = false;
-            activeImageOperation = null;
-            resultPopover.setAttribute("aria-busy", "false");
+            if (imageOperations.get(operation.pairKey) === operation)
+                imageOperations.delete(operation.pairKey);
+            if (activeImageOperation === operation) {
+                activeImageOperation = null;
+                if (activePair === operation.pairKey)
+                    resultPopover.setAttribute("aria-busy", "false");
+            }
             updateRetryButtons();
         }
     }
@@ -929,17 +1166,20 @@ function openResult(
                     activePair !== pairKey ||
                     imageCache.peek(pairKey)?.url !== displayedImageUrl ||
                     activePopoverImage?.token !== renderToken ||
-                    activePopoverImage.image !== image ||
-                    (imageOperation &&
-                        (imageOperation.id !== generation ||
-                            activeImageOperation !== imageOperation))
+                    activePopoverImage.image !== image
                 ) {
                     return;
                 }
-                if (imageOperation) {
+                completeImageOperation(pairKey, displayedImageUrl);
+                if (
+                    imageOperation &&
+                    imageOperation.imageUrl === displayedImageUrl
+                ) {
                     clearImageTimer(imageOperation);
                     imageOperation.imagePending = false;
-                    activeImageOperation = null;
+                    imageOperation.imageDisplayed = true;
+                    if (activeImageOperation === imageOperation)
+                        activeImageOperation = null;
                 }
                 image.setAttribute("aria-busy", "false");
                 resultPopover.setAttribute("aria-busy", "false");
@@ -1022,7 +1262,7 @@ function openError(error, stage, x, y, discovery = activeDiscovery) {
     positionResult(x, y);
     retryTextAvailable = false;
     retryImage.disabled =
-        stage !== "image" || activeImageOperation?.imagePending === true;
+        stage !== "image" || currentImageOperation()?.imagePending === true;
     announce(messageText);
 }
 function closeResult() {
@@ -1031,10 +1271,10 @@ function closeResult() {
     resultPopover.hidden = true;
     activePopoverImage = null;
     resultAnchor = null;
-    cancelImageOperation();
     activePair = null;
     activeDiscovery = null;
     activeCombination = null;
+    activeImageOperation = null;
     retryTextAvailable = false;
     resultPopover.setAttribute("aria-busy", "false");
     const returnFocus = resultReturnFocus;
@@ -1051,13 +1291,13 @@ function closeResult() {
 function cancelCombination() {
     if (!busy) return;
     generation += 1;
-    cancelImageOperation();
     setTextBusy(false);
     setBusy(false);
     selected = [];
     activePair = null;
     activeDiscovery = null;
     activeCombination = null;
+    activeImageOperation = null;
     retryTextAvailable = false;
     resultPopover.hidden = true;
     resultAnchor = null;
@@ -1136,7 +1376,7 @@ document.querySelector("#result-close").addEventListener("click", closeResult);
 retryImage.addEventListener("click", () => {
     if (
         !busy &&
-        activeImageOperation?.imagePending !== true &&
+        currentImageOperation()?.imagePending !== true &&
         activeDiscovery
     ) {
         const key = getKey();
@@ -1151,6 +1391,7 @@ retryImage.addEventListener("click", () => {
             discovery: { ...activeDiscovery },
             x: anchor.x,
             y: anchor.y,
+            cancelled: false,
         };
         imageCache.delete(operation.pairKey);
         loadImage(operation, key);
@@ -1171,6 +1412,8 @@ retryText.addEventListener("click", () => {
 resetButton.addEventListener("click", () => {
     if (busy || !globalThis.confirm("Reset your local discovery book?")) return;
     generation += 1;
+    cancelActiveDrags();
+    cancelAllImageOperations();
     state = createInitialState();
     try {
         localStore?.removeItem(STORAGE_KEY);
@@ -1214,7 +1457,8 @@ globalThis.addEventListener("resize", () => {
 });
 globalThis.addEventListener("pagehide", () => {
     generation += 1;
-    cancelImageOperation();
+    cancelActiveDrags();
+    cancelAllImageOperations();
     imageCache.clear();
 });
 

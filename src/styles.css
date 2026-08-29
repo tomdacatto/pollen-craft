@@ -103,19 +103,62 @@ button:disabled { cursor: wait; opacity: .55; }
         radial-gradient(rgba(17, 5, 24, .12) 1px, transparent 1px);
     background-size: auto, auto, auto, 24px 24px;
 }
-.crafting-canvas::after {
+.canvas-garden {
     position: absolute;
-    right: 8%;
-    bottom: 12%;
-    width: 94px;
-    height: 94px;
-    border: 2px solid rgba(17, 5, 24, .12);
-    background: var(--periwinkle);
-    content: "";
-    opacity: .5;
-    transform: rotate(8deg);
+    z-index: 0;
+    inset: 0;
+    overflow: hidden;
     pointer-events: none;
+    background:
+        radial-gradient(circle at 18% 24%, rgba(201, 169, 228, .26) 0 3px, transparent 4px),
+        radial-gradient(circle at 77% 16%, rgba(168, 230, 162, .3) 0 2px, transparent 3px),
+        radial-gradient(circle at 90% 68%, rgba(232, 243, 114, .34) 0 3px, transparent 4px),
+        radial-gradient(ellipse at 31% 84%, rgba(216, 223, 248, .72) 0 15%, rgba(216, 223, 248, 0) 42%);
 }
+.garden-flower {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border: 3px solid var(--lavender-strong);
+    border-radius: 50%;
+    background: var(--lime-strong);
+    box-shadow:
+        0 -9px 0 -3px var(--periwinkle-strong),
+        0 9px 0 -3px var(--mint-strong),
+        -9px 0 0 -3px var(--lavender-strong),
+        9px 0 0 -3px var(--lavender-strong),
+        3px 3px 0 var(--ink);
+    opacity: .8;
+    animation: gardenSway 12s ease-in-out infinite;
+}
+.garden-flower::after {
+    position: absolute;
+    top: 17px;
+    left: 8px;
+    width: 2px;
+    height: 40px;
+    background: var(--mint-strong);
+    box-shadow: 5px 22px 0 -1px var(--lime-strong);
+    content: "";
+    transform: rotate(8deg);
+    transform-origin: top;
+}
+.garden-flower--upper { top: 18%; left: 20%; transform: scale(.72); }
+.garden-flower--lower { right: 13%; bottom: 16%; transform: scale(1.08); animation-delay: -5s; }
+.garden-pollen {
+    position: absolute;
+    width: 7px;
+    height: 7px;
+    border: 1px solid var(--ink);
+    border-radius: 50%;
+    background: var(--lime-strong);
+    box-shadow: 9px -12px 0 -1px var(--lavender-strong), 20px 5px 0 -1px var(--mint-strong);
+    opacity: .78;
+    animation: gardenSway 10s ease-in-out infinite reverse;
+}
+.garden-pollen--one { top: 32%; left: 41%; }
+.garden-pollen--two { top: 22%; right: 24%; transform: scale(.72); animation-delay: -3s; }
+.garden-pollen--three { right: 36%; bottom: 28%; transform: scale(.56); animation-delay: -7s; }
 .canvas-hint {
     position: absolute;
     top: 20px;
@@ -197,6 +240,7 @@ button:disabled { cursor: wait; opacity: .55; }
     bottom: 0;
     width: 330px;
     overflow: auto;
+    touch-action: pan-y;
     border-left: 3px solid var(--ink);
     background: var(--lavender);
     padding: 24px 20px;
@@ -261,7 +305,8 @@ h2 { font-size: 15px; }
     background: var(--white);
     box-shadow: 2px 2px 0 var(--ink);
     font-size: 12px;
-    touch-action: pan-x;
+    touch-action: pan-y;
+    cursor: grab;
 }
 .inventory-chip[data-tone="lavender"] { background: var(--lavender); }
 .inventory-chip[data-tone="periwinkle"] { background: var(--periwinkle); }
@@ -271,6 +316,24 @@ h2 { font-size: 15px; }
 .inventory-chip:active { box-shadow: 1px 1px 0 var(--ink); transform: translate(1px, 1px); }
 .inventory-chip small { overflow: hidden; max-width: 160px; text-overflow: ellipsis; white-space: nowrap; }
 .inventory-chip.is-seed { border-style: dashed; }
+.inventory-drag-ghost {
+    position: fixed;
+    z-index: 100;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 44px;
+    max-width: min(230px, calc(100vw - 24px));
+    border: 2px solid var(--ink);
+    padding: 6px 9px;
+    background: var(--lime-strong);
+    box-shadow: 5px 5px 0 var(--ink);
+    font-size: 12px;
+    pointer-events: none;
+    user-select: none;
+    transform: translate(-50%, -50%) rotate(-2deg);
+}
+.inventory-drag-ghost > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .live-region { position: fixed; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 
@@ -335,10 +398,15 @@ code { color: var(--ink); font-family: inherit; font-weight: 700; }
 .result-actions .plain-button:active { box-shadow: 0 0 0 var(--ink); }
 
 @keyframes bloom { from { opacity: 0; transform: scale(.9); } to { opacity: 1; transform: scale(1); } }
+@keyframes gardenSway {
+    0%, 100% { translate: 0 0; }
+    50% { translate: 3px -4px; }
+}
 
 @media (prefers-reduced-motion: reduce) {
     .canvas-chip { transition: none; }
     .canvas-chip.is-dragging, .canvas-chip.is-drop-target { transform: none; }
+    .garden-flower, .garden-pollen { animation: none; }
 }
 
 @media (max-width: 760px) {
@@ -350,7 +418,6 @@ code { color: var(--ink); font-family: inherit; font-weight: 700; }
     .top-button { padding: 7px 6px; font: 10px/1.2 "IBM Plex Mono", "Courier New", monospace; font-weight: 600; }
     .crafting-canvas { inset: 60px 0 220px; }
     .canvas-hint { top: 14px; left: 14px; font-size: 10px; }
-    .crafting-canvas::after { right: 7%; bottom: 9%; width: 64px; height: 64px; }
     .inventory-rail {
         display: flex;
         flex-direction: column;
@@ -362,6 +429,7 @@ code { color: var(--ink); font-family: inherit; font-weight: 700; }
         border-left: 0;
         padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
         overflow: hidden;
+        touch-action: pan-x;
     }
     .inventory-rail::before { height: 5px; margin: -10px -12px 10px; }
     .inventory-head { flex: none; margin-bottom: 7px; }
@@ -370,7 +438,8 @@ code { color: var(--ink); font-family: inherit; font-weight: 700; }
     .inventory-count { min-width: 38px; height: 28px; }
     .search-box { order: 3; flex: none; margin: 8px 0 0; }
     .inventory-chips { order: 2; flex-wrap: nowrap; flex: 1; min-height: 0; align-items: flex-start; overflow-x: auto; overflow-y: hidden; padding: 1px 2px 5px 1px; gap: 7px; }
-    .inventory-chip { flex: 0 0 auto; min-height: 44px; padding: 5px 8px; }
+    .inventory-chip { flex: 0 0 auto; min-height: 44px; padding: 5px 8px; touch-action: pan-x; }
+    .garden-flower--lower { display: none; }
     .result-popover { max-height: min(calc(100dvh - 24px), calc(100dvh - 304px)); }
 }
 @media (prefers-reduced-motion: reduce) {
