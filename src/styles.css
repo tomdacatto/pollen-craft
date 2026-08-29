@@ -142,6 +142,8 @@ button:disabled { cursor: wait; opacity: .55; }
     font-size: 13px;
     touch-action: none;
     user-select: none;
+    cursor: grab;
+    transition: transform 140ms ease, box-shadow 140ms ease;
 }
 .canvas-chip[data-tone="lavender"] { background: var(--lavender); }
 .canvas-chip[data-tone="periwinkle"] { background: var(--periwinkle); }
@@ -152,6 +154,18 @@ button:disabled { cursor: wait; opacity: .55; }
     transform: translate(-2px, -2px);
 }
 .canvas-chip:active { box-shadow: 1px 1px 0 var(--ink); transform: translate(2px, 2px); }
+.canvas-chip.is-dragging {
+    cursor: grabbing;
+    box-shadow: 7px 7px 0 var(--ink);
+    transform: scale(1.05);
+}
+.canvas-chip.is-drop-target {
+    outline: 3px solid var(--ink);
+    outline-offset: 2px;
+    box-shadow: 6px 6px 0 var(--ink);
+    background: var(--lime-strong);
+    transform: scale(1.03);
+}
 .canvas-chip.is-new { animation: bloom .16s ease-out; }
 .chip-icon { font-size: 17px; }
 .canvas-chip > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -302,6 +316,11 @@ code { color: var(--ink); font-family: inherit; font-weight: 700; }
 .result-actions .plain-button:active { box-shadow: 0 0 0 var(--ink); }
 
 @keyframes bloom { from { opacity: 0; transform: scale(.9); } to { opacity: 1; transform: scale(1); } }
+
+@media (prefers-reduced-motion: reduce) {
+    .canvas-chip { transition: none; }
+    .canvas-chip.is-dragging, .canvas-chip.is-drop-target { transform: none; }
+}
 
 @media (max-width: 760px) {
     .topbar { gap: 9px; height: 60px; padding: 0 10px; }

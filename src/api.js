@@ -10,6 +10,7 @@ export const MAX_JSON_BYTES = 64 * 1024;
 export const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 export const SECRET_KEY_PATTERN = /^sk_[^\s]{8,177}$/u;
 export const TEXT_MODELS = Object.freeze([
+    { id: "nemotron-3.5-lightning", label: "NVIDIA Nemotron 3.5 Lightning" },
     { id: "openai-fast", label: "GPT-5 Nano" },
     { id: "openai", label: "GPT-5.4 Nano" },
     { id: "claude-fast", label: "Claude Fast" },
@@ -174,10 +175,37 @@ function combinationPrompt(pair) {
     const second = pair.second.description
         ? `${pair.second.name}: ${pair.second.description}`
         : pair.second.name;
-    return `Combine these two ingredients into one surprising, family-friendly craft discovery. Return only strict JSON with exactly two string fields: name (1-4 words) and description (one vivid sentence, 12-28 words). Do not use markdown or HTML. Ingredients: ${first}; ${second}.`.slice(
+    return `Return the most recognizable established result of combining these two ingredients. Prefer physical, scientific, or everyday outcomes. Use one familiar noun or concept. Never list or concatenate the inputs, and do not add arbitrary decorative objects when an obvious result exists. Be imaginative only when no conventional relationship exists. Examples: Fire+Water=>Steam; Fire+Earth=>Lava; Water+Earth=>Mud; Fire+Wind=>Smoke; Water+Wind=>Mist; Earth+Wind=>Dust. Return only strict JSON with exactly two string fields: name (1-4 words) and description (one vivid sentence, 12-28 words). Do not use markdown or HTML. Ingredients: ${first}; ${second}.`.slice(
         0,
         MAX_PROMPT_LENGTH,
     );
+}
+
+function containsCompletePhrase(text, phrase) {
+    const escaped = phrase.trim().replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    return escaped
+        ? new RegExp(
+              `(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`,
+              "iu",
+          ).test(text)
+        : false;
+}
+
+function validatePairDiscovery(discovery, pair) {
+    const ingredientNames = [pair.first.name, pair.second.name]
+        .map((name) => String(name ?? "").trim())
+        .filter(Boolean);
+    if (
+        new Set(ingredientNames.map((name) => name.toLowerCase())).size > 1 &&
+        ingredientNames.every((name) =>
+            containsCompletePhrase(discovery.name, name),
+        )
+    )
+        throw new ApiError(
+            "The idea repeated the ingredients. Retry the idea.",
+            "parse",
+        );
+    return discovery;
 }
 
 export function createApiClient(fetchImpl = globalThis.fetch, options = {}) {
@@ -212,9 +240,13 @@ export function createApiClient(fetchImpl = globalThis.fetch, options = {}) {
                     max_tokens: 2048,
                     ...(modelId === "openai-fast"
                         ? { reasoning_effort: "minimal" }
-                        : {}),
+                        : modelId === "nemotron-3.5-lightning"
+                          ? { reasoning_effort: "none" }
+                          : {}),
                     response_format:
-                        modelId === "openai-fast" || modelId === "openai"
+                        modelId === "nemotron-3.5-lightning" ||
+                        modelId === "openai-fast" ||
+                        modelId === "openai"
                             ? DISCOVERY_RESPONSE_FORMAT
                             : { type: "json_object" },
                 }),
@@ -245,8 +277,12 @@ export function createApiClient(fetchImpl = globalThis.fetch, options = {}) {
                 if (typeof content !== "string")
                     throw new ApiError("The lab returned no idea.", "parse");
                 try {
-                    return parseDiscoveryPayload(JSON.parse(content));
+                    return validatePairDiscovery(
+                        parseDiscoveryPayload(JSON.parse(content)),
+                        pair,
+                    );
                 } catch (error) {
+                    if (error instanceof ApiError) throw error;
                     if (
                         error.message.includes("invalid") ||
                         error.message.includes("incomplete") ||

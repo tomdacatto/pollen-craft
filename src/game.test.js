@@ -188,17 +188,21 @@ test("text requests dedupe canonical pairs per credential without exposing keys"
         client.discoverText(reverse, "sk_test_12345678", "openai"),
         client.discoverText(forward, "sk_test_12345678", "claude-fast"),
         client.discoverText(reverse, "sk_test_12345678", "claude-fast"),
+        client.discoverText(forward, "sk_test_12345678", "openai-fast"),
+        client.discoverText(reverse, "sk_test_12345678", "openai-fast"),
     ]);
-    assert.equal(calls, 4);
+    assert.equal(calls, 5);
+    assert.equal(DEFAULT_TEXT_MODEL, "nemotron-3.5-lightning");
     assert.deepEqual(requestModels, [
         DEFAULT_TEXT_MODEL,
         DEFAULT_TEXT_MODEL,
         "openai",
         "claude-fast",
+        "openai-fast",
     ]);
     const defaultBody = requestBodies[0];
     assert.equal(defaultBody.max_tokens, 2048);
-    assert.equal(defaultBody.reasoning_effort, "minimal");
+    assert.equal(defaultBody.reasoning_effort, "none");
     assert.deepEqual(defaultBody.response_format, {
         type: "json_schema",
         json_schema: {
@@ -222,6 +226,13 @@ test("text requests dedupe canonical pairs per credential without exposing keys"
     );
     assert.equal(Object.hasOwn(requestBodies[3], "reasoning_effort"), false);
     assert.deepEqual(requestBodies[3].response_format, { type: "json_object" });
+    assert.equal(requestBodies[4].reasoning_effort, "minimal");
+    assert.deepEqual(
+        requestBodies[4].response_format,
+        defaultBody.response_format,
+    );
+    assert.match(requestBodies[0].messages[0].content, /Fire\+Water=>Steam/u);
+    assert.doesNotMatch(requestBodies[0].messages[0].content, /surprising/u);
 });
 
 test("truncated text responses are retryable instead of malformed JSON", async () => {
@@ -248,6 +259,105 @@ test("truncated text responses are retryable instead of malformed JSON", async (
         () => client.discoverText(pair, "sk_test_12345678"),
         /The idea response was cut off\. Retry the idea\./u,
     );
+});
+
+test("pair validation rejects repeated ingredient names without blocking compounds", async () => {
+    const pair = {
+        first: { id: "fire", name: "Fire", description: "spark" },
+        second: { id: "water", name: "Water", description: "current" },
+    };
+    const repeated = createApiClient(
+        async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [
+                        {
+                            finish_reason: "stop",
+                            message: {
+                                content: JSON.stringify({
+                                    name: "Fire and Water Lantern",
+                                    description: "A glowing lantern.",
+                                }),
+                            },
+                        },
+                    ],
+                }),
+                {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                },
+            ),
+        { timeoutMs: 1000 },
+    );
+    await assert.rejects(
+        () => repeated.discoverText(pair, "sk_test_12345678"),
+        /The idea repeated the ingredients\. Retry the idea\./u,
+    );
+    const compound = createApiClient(
+        async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [
+                        {
+                            finish_reason: "stop",
+                            message: {
+                                content: JSON.stringify({
+                                    name: "Sandcastle",
+                                    description: "A castle made from sand.",
+                                }),
+                            },
+                        },
+                    ],
+                }),
+                {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                },
+            ),
+        { timeoutMs: 1000 },
+    );
+    const result = await compound.discoverText(
+        {
+            first: { id: "sand", name: "Sand", description: "grains" },
+            second: { id: "castle", name: "Castle", description: "fort" },
+        },
+        "sk_test_12345678",
+    );
+    assert.equal(result.name, "Sandcastle");
+});
+
+test("unrelated plus names pass pair validation", async () => {
+    const client = createApiClient(
+        async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [
+                        {
+                            finish_reason: "stop",
+                            message: {
+                                content: JSON.stringify({
+                                    name: "C++",
+                                    description: "A programming language.",
+                                }),
+                            },
+                        },
+                    ],
+                }),
+                {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                },
+            ),
+        { timeoutMs: 1000 },
+    );
+    const result = await client.discoverText(
+        {
+            first: { id: "fire", name: "Fire", description: "spark" },
+            second: { id: "water", name: "Water", description: "current" },
+        },
+        "sk_test_12345678",
+    );
+    assert.equal(result.name, "C++");
 });
 
 test("image requests validate content type and bounded size", async () => {

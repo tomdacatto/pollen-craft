@@ -38,6 +38,7 @@ const settingsDialog = document.querySelector("#settings-dialog");
 const helpDialog = document.querySelector("#help-dialog");
 const resetButton = document.querySelector("#reset-game");
 const IMAGE_DECODE_TIMEOUT_MS = 15_000;
+const TEXT_MODEL_STORAGE_KEY = "pollen-craft:text-model:v2";
 let state = loadState(localStore);
 let selected = [];
 let instances = new Map();
@@ -60,6 +61,7 @@ let activeCombination = null;
 let activeImageOperation = null;
 let retryTextAvailable = false;
 let nextInstanceId = 0;
+let nextZIndex = 0;
 
 function safeStorage(name) {
     try {
@@ -113,7 +115,7 @@ function getKey() {
 }
 function readTextModel() {
     try {
-        const model = localStore?.getItem("pollen-craft:text-model") || "";
+        const model = localStore?.getItem(TEXT_MODEL_STORAGE_KEY) || "";
         if (isTextModel(model)) return model;
     } catch {
         /* storage may be blocked */
@@ -231,6 +233,7 @@ function createInstance(item, x, y, isNew = false) {
         itemId: item.id,
         x: point.x,
         y: point.y,
+        zIndex: ++nextZIndex,
     };
     instances.set(instance.id, instance);
     renderCanvas(isNew ? instance.id : null);
@@ -249,6 +252,7 @@ function renderCanvas(newId = null) {
         chip.dataset.tone = itemTone(item);
         chip.style.left = `${instance.x}px`;
         chip.style.top = `${instance.y}px`;
+        chip.style.zIndex = String(instance.zIndex);
         chip.setAttribute(
             "aria-pressed",
             String(selected.includes(instance.id)),
@@ -434,6 +438,9 @@ function startDrag(event, id) {
     const instance = instances.get(id);
     if (!instance) return;
     const chip = event.currentTarget;
+    instance.zIndex = ++nextZIndex;
+    chip.style.zIndex = String(instance.zIndex);
+    chip.classList.add("is-dragging");
     chip.setPointerCapture(event.pointerId);
     const canvasRect = canvas.getBoundingClientRect();
     const chipRect = chip.getBoundingClientRect();
@@ -467,26 +474,49 @@ function startDrag(event, id) {
         instance.y = point.y;
         chip.style.left = `${point.x}px`;
         chip.style.top = `${point.y}px`;
+        setDropTarget(drag.moved ? findCollision(instance) : null);
     }
-    function endDrag() {
-        if (!drag || drag.id !== id) return;
+    function endDrag(end) {
+        if (!drag || drag.id !== id || drag.ended) return;
         const current = drag;
+        current.ended = true;
         drag = null;
         chip.removeEventListener("pointermove", moveDrag);
         chip.removeEventListener("pointerup", endDrag);
         chip.removeEventListener("pointercancel", endDrag);
+        chip.removeEventListener("lostpointercapture", endDrag);
+        chip.classList.remove("is-dragging");
+        setDropTarget(null);
         if (chip.hasPointerCapture?.(current.pointerId))
             chip.releasePointerCapture(current.pointerId);
+        if (end.type !== "pointerup") return;
         const other = current.moved ? findCollision(instance) : null;
         if (other) combineInstances(instance, other);
         else if (!current.moved) activateInstance(id);
     }
+    chip.addEventListener("lostpointercapture", endDrag);
+}
+function setDropTarget(target) {
+    for (const chip of canvasItems.querySelectorAll(".is-drop-target"))
+        chip.classList.remove("is-drop-target");
+    if (target)
+        canvasItems
+            .querySelector(`[data-instance="${target.id}"]`)
+            ?.classList.add("is-drop-target");
 }
 function findCollision(instance) {
     const source = canvasItems
         .querySelector(`[data-instance="${instance.id}"]`)
         ?.getBoundingClientRect();
     if (!source) return null;
+    const sourceCenter = {
+        x: (source.left + source.right) / 2,
+        y: (source.top + source.bottom) / 2,
+    };
+    let best = null;
+    let bestDistance = Infinity;
+    let bestOrder = Infinity;
+    let order = 0;
     for (const other of instances.values()) {
         if (other.id === instance.id) continue;
         const target = canvasItems
@@ -498,10 +528,31 @@ function findCollision(instance) {
             source.right > target.left &&
             source.top < target.bottom &&
             source.bottom > target.top
-        )
-            return other;
+        ) {
+            const targetCenter = {
+                x: (target.left + target.right) / 2,
+                y: (target.top + target.bottom) / 2,
+            };
+            const distance =
+                (sourceCenter.x - targetCenter.x) ** 2 +
+                (sourceCenter.y - targetCenter.y) ** 2;
+            const isBetter =
+                !best ||
+                other.zIndex > best.zIndex ||
+                (other.zIndex === best.zIndex &&
+                    (distance < bestDistance ||
+                        (distance === bestDistance &&
+                            (other.id < best.id ||
+                                (other.id === best.id && order < bestOrder)))));
+            if (isBetter) {
+                best = other;
+                bestDistance = distance;
+                bestOrder = order;
+            }
+        }
+        order += 1;
     }
-    return null;
+    return best;
 }
 function activateInstance(id) {
     if (busy) return;
@@ -930,7 +981,7 @@ keyForm.addEventListener("submit", (event) => {
     event.preventDefault();
     const model = getTextModel();
     try {
-        localStore?.setItem("pollen-craft:text-model", model);
+        localStore?.setItem(TEXT_MODEL_STORAGE_KEY, model);
     } catch {
         /* storage may be blocked */
     }
@@ -1015,6 +1066,7 @@ resetButton.addEventListener("click", () => {
     }
     instances = new Map();
     nextInstanceId = 0;
+    nextZIndex = 0;
     selected = [];
     closeResult();
     renderCanvas();
