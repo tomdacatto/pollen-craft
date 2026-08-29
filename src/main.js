@@ -14,6 +14,7 @@ import {
     inventoryItems,
     loadState,
     SEEDS,
+    STORAGE_KEY,
     saveState,
 } from "./game.js";
 
@@ -1060,7 +1061,7 @@ resetButton.addEventListener("click", () => {
     generation += 1;
     state = createInitialState();
     try {
-        localStore?.removeItem("pollen-craft:game:v1");
+        localStore?.removeItem(STORAGE_KEY);
     } catch {
         /* storage may be blocked */
     }

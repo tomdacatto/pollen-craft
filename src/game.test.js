@@ -4,6 +4,7 @@ import {
     API_BASE,
     createApiClient,
     DEFAULT_TEXT_MODEL,
+    GROUNDED_RECIPES,
     isSecretKey,
     MAX_IMAGE_BYTES,
 } from "./api.js";
@@ -18,6 +19,7 @@ import {
     MAX_DISCOVERIES,
     normalizeState,
     parseDiscoveryPayload,
+    STORAGE_KEY,
     saveState,
 } from "./game.js";
 
@@ -54,7 +56,7 @@ test("discovery parser requires bounded plain strings", () => {
 });
 
 test("state load recovers corruption and bounds discoveries", () => {
-    const storage = new Map([["pollen-craft:game:v1", "not json"]]);
+    const storage = new Map([[STORAGE_KEY, "not json"]]);
     storage.getItem = storage.get.bind(storage);
     storage.removeItem = storage.delete.bind(storage);
     assert.deepEqual(loadState(storage), createInitialState());
@@ -72,8 +74,7 @@ test("state load recovers corruption and bounds discoveries", () => {
     saved.removeItem = saved.delete.bind(saved);
     saveState(state, saved);
     assert.equal(
-        normalizeState(JSON.parse(saved.get("pollen-craft:game:v1"))).order
-            .length,
+        normalizeState(JSON.parse(saved.get(STORAGE_KEY))).order.length,
         MAX_DISCOVERIES,
     );
     const inherited = Object.create({
@@ -86,6 +87,38 @@ test("state load recovers corruption and bounds discoveries", () => {
     inherited.order = ["toString"];
     assert.equal(normalizeState(inherited).order.length, 0);
     assert.equal(findDiscovery(createInitialState(), "toString"), null);
+});
+
+test("v1 cache is ignored while v2 persists and reloads", () => {
+    const legacyKey = "pollen-craft:game:v1";
+    const storage = new Map([
+        [
+            legacyKey,
+            JSON.stringify({
+                version: 1,
+                discoveries: {
+                    "fire+water": {
+                        name: "Old Steam",
+                        description: "A stale recipe.",
+                    },
+                },
+                order: ["fire+water"],
+            }),
+        ],
+    ]);
+    storage.getItem = storage.get.bind(storage);
+    storage.setItem = (key, value) => storage.set(key, value);
+    storage.removeItem = storage.delete.bind(storage);
+    assert.deepEqual(loadState(storage), createInitialState());
+    assert.equal(storage.has(legacyKey), true);
+    const state = gameReducer(createInitialState(), {
+        type: "discover",
+        pair: "fire+water",
+        discovery: { name: "Steam", description: "Water vapor." },
+    });
+    saveState(state, storage);
+    assert.equal(JSON.parse(storage.get(STORAGE_KEY)).version, 2);
+    assert.deepEqual(loadState(storage), state);
 });
 
 test("discoveries become combinable inventory items", () => {
@@ -172,11 +205,12 @@ test("text requests dedupe canonical pairs per credential without exposing keys"
     const second = { id: "water", name: "Water", description: "current" };
     const reverse = { first: second, second: first };
     const forward = { first, second };
-    await Promise.all([
+    const [defaultResult] = await Promise.all([
         client.discoverText(forward, "sk_test_12345678"),
         client.discoverText(reverse, "sk_test_12345678"),
     ]);
     assert.equal(calls, 1);
+    assert.equal(defaultResult.description, "A bright cloud.");
     assert.deepEqual(requestModels, [DEFAULT_TEXT_MODEL]);
     await Promise.all([
         client.discoverText(forward, "sk_test_abcdefgh"),
@@ -211,7 +245,7 @@ test("text requests dedupe canonical pairs per credential without exposing keys"
             schema: {
                 type: "object",
                 properties: {
-                    name: { type: "string" },
+                    name: { type: "string", enum: ["Steam"] },
                     description: { type: "string" },
                 },
                 required: ["name", "description"],
@@ -233,6 +267,7 @@ test("text requests dedupe canonical pairs per credential without exposing keys"
     );
     assert.match(requestBodies[0].messages[0].content, /Fire\+Water=>Steam/u);
     assert.doesNotMatch(requestBodies[0].messages[0].content, /surprising/u);
+    assert.ok(requestBodies[0].messages[0].content.length <= 1400);
 });
 
 test("truncated text responses are retryable instead of malformed JSON", async () => {
@@ -328,8 +363,17 @@ test("pair validation rejects repeated ingredient names without blocking compoun
 
 test("unrelated plus names pass pair validation", async () => {
     const client = createApiClient(
-        async () =>
-            new Response(
+        async (_url, options) => {
+            const body = JSON.parse(options.body);
+            assert.equal(body.model, DEFAULT_TEXT_MODEL);
+            assert.equal(
+                Object.hasOwn(
+                    body.response_format.json_schema.schema.properties.name,
+                    "enum",
+                ),
+                false,
+            );
+            return new Response(
                 JSON.stringify({
                     choices: [
                         {
@@ -347,17 +391,140 @@ test("unrelated plus names pass pair validation", async () => {
                     status: 200,
                     headers: { "content-type": "application/json" },
                 },
+            );
+        },
+        { timeoutMs: 1000 },
+    );
+    const result = await client.discoverText(
+        {
+            first: { id: "copper", name: "Copper", description: "metal" },
+            second: { id: "zinc", name: "Zinc", description: "metal" },
+        },
+        "sk_test_12345678",
+    );
+    assert.equal(result.name, "C++");
+});
+
+test("same-item results may contain their ingredient name", async () => {
+    const client = createApiClient(
+        async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [
+                        {
+                            finish_reason: "stop",
+                            message: {
+                                content: JSON.stringify({
+                                    name: "Fire",
+                                    description: "A bright flame.",
+                                }),
+                            },
+                        },
+                    ],
+                }),
+                {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                },
             ),
         { timeoutMs: 1000 },
     );
     const result = await client.discoverText(
         {
             first: { id: "fire", name: "Fire", description: "spark" },
-            second: { id: "water", name: "Water", description: "current" },
+            second: { id: "fire", name: "Fire", description: "spark" },
         },
         "sk_test_12345678",
     );
-    assert.equal(result.name, "C++");
+    assert.equal(result.name, "Fire");
+});
+
+test("grounded anchors resolve in either order and constrain strict names", async () => {
+    let index = 0;
+    const client = createApiClient(
+        async (_url, _options) => {
+            const [, , name] = GROUNDED_RECIPES[index++];
+            return new Response(
+                JSON.stringify({
+                    choices: [
+                        {
+                            finish_reason: "stop",
+                            message: {
+                                content: JSON.stringify({
+                                    name,
+                                    description: "A fresh grounded definition.",
+                                }),
+                            },
+                        },
+                    ],
+                }),
+                {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                },
+            );
+        },
+        { timeoutMs: 1000 },
+    );
+    for (const [
+        recipeIndex,
+        [firstName, secondName, expectedName],
+    ] of GROUNDED_RECIPES.entries()) {
+        const first = {
+            id: firstName.toLowerCase(),
+            name: firstName,
+            description: "ingredient",
+        };
+        const second = {
+            id: secondName.toLowerCase(),
+            name: secondName,
+            description: "ingredient",
+        };
+        const pair =
+            recipeIndex === 0
+                ? { first: second, second: first }
+                : { first, second };
+        const result = await client.discoverText(pair, "sk_test_12345678");
+        assert.equal(result.name, expectedName);
+    }
+    assert.equal(index, GROUNDED_RECIPES.length);
+});
+
+test("grounded anchor mismatch is rejected without silent correction", async () => {
+    const client = createApiClient(
+        async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [
+                        {
+                            finish_reason: "stop",
+                            message: {
+                                content: JSON.stringify({
+                                    name: "Sailing Vessel",
+                                    description: "A boat.",
+                                }),
+                            },
+                        },
+                    ],
+                }),
+                {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                },
+            ),
+        { timeoutMs: 1000 },
+    );
+    await assert.rejects(
+        () =>
+            client.discoverText(
+                {
+                    first: { id: "cloud", name: "Cloud", description: "vapor" },
+                    second: { id: "wind", name: "Wind", description: "air" },
+                },
+                "sk_test_12345678",
+            ),
+        /The grounded result must be Storm\. Retry the idea\./u,
+    );
 });
 
 test("image requests validate content type and bounded size", async () => {

@@ -1,5 +1,5 @@
-export const STORAGE_KEY = "pollen-craft:game:v1";
-export const SCHEMA_VERSION = 1;
+export const STORAGE_KEY = "pollen-craft:game:v2";
+export const SCHEMA_VERSION = 2;
 export const MAX_DISCOVERIES = 120;
 export const MAX_NAME_LENGTH = 64;
 export const MAX_DESCRIPTION_LENGTH = 280;
