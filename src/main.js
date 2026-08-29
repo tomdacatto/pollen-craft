@@ -17,6 +17,7 @@ import {
     STORAGE_KEY,
     saveState,
 } from "./game.js";
+import { createImageCache } from "./image-cache.js";
 
 const localStore = safeStorage("localStorage");
 const tabStore = safeStorage("sessionStorage");
@@ -52,7 +53,7 @@ let busy = false;
 let generation = 0;
 let activePair = null;
 let activeDiscovery = null;
-let activeObjectUrl = null;
+let activePopoverImage = null;
 let resultAnchor = null;
 let focusedPair = null;
 let focusedInstanceId = null;
@@ -63,6 +64,7 @@ let activeImageOperation = null;
 let retryTextAvailable = false;
 let nextInstanceId = 0;
 let nextZIndex = 0;
+let nextPopoverRenderToken = 0;
 
 function safeStorage(name) {
     try {
@@ -74,9 +76,60 @@ function safeStorage(name) {
 function announce(message) {
     live.textContent = message;
 }
-function revokeImage() {
-    if (activeObjectUrl) URL.revokeObjectURL(activeObjectUrl);
-    activeObjectUrl = null;
+const imageCache = createImageCache({
+    onEvict(pairKey) {
+        refreshImageVisuals(pairKey);
+    },
+});
+function handleImageFailure(
+    pairKey,
+    url,
+    operation = null,
+    renderToken = null,
+    renderedImage = null,
+) {
+    if (
+        renderToken !== null &&
+        (activePopoverImage?.token !== renderToken ||
+            activePopoverImage.image !== renderedImage)
+    )
+        return false;
+    const cached = imageCache.peek(pairKey);
+    if (!cached || cached.url !== url) return false;
+    const activeOperation =
+        operation ??
+        (activeImageOperation?.pairKey === pairKey &&
+        activeImageOperation.imageUrl === url
+            ? activeImageOperation
+            : null);
+    clearImageTimer(activeOperation);
+    if (activeImageOperation === activeOperation) {
+        activeOperation.imagePending = false;
+        activeImageOperation = null;
+    }
+    const popoverImage =
+        !resultPopover.hidden &&
+        activePopoverImage?.pairKey === pairKey &&
+        activePopoverImage.url === url
+            ? activePopoverImage
+            : null;
+    imageCache.delete(pairKey);
+    if (!popoverImage) return true;
+    activePopoverImage = null;
+    resultPopover.setAttribute("aria-busy", "false");
+    openResult(
+        popoverImage.discovery,
+        popoverImage.x,
+        popoverImage.y,
+        popoverImage.label,
+        null,
+        true,
+        false,
+    );
+    announce(
+        `${popoverImage.discovery.name} illustration could not be displayed.`,
+    );
+    return true;
 }
 function clearImageTimer(operation) {
     if (!operation?.imageTimer) return;
@@ -155,6 +208,44 @@ function itemTone(item) {
         0,
     );
     return ["lavender", "periwinkle", "mint", "lime"][score % 4];
+}
+function imageElement(url, pairKey) {
+    const image = document.createElement("img");
+    image.src = url;
+    image.alt = "";
+    image.setAttribute("aria-hidden", "true");
+    image.decoding = "async";
+    image.loading = "lazy";
+    image.addEventListener("error", () => handleImageFailure(pairKey, url), {
+        once: true,
+    });
+    return image;
+}
+function updateImageVisual(slot, item) {
+    const cached = item.discovered ? imageCache.peek(item.pair) : null;
+    slot.classList.toggle("is-placeholder", !cached && item.discovered);
+    slot.replaceChildren();
+    if (cached) slot.append(imageElement(cached.url, item.pair));
+    else if (!item.discovered) {
+        const icon = document.createElement("span");
+        icon.textContent = item.icon ?? "";
+        slot.append(icon);
+    }
+}
+function createElementVisual(item) {
+    const slot = document.createElement("span");
+    slot.className = "element-visual";
+    slot.dataset.pairKey = item.discovered ? item.pair : "";
+    slot.setAttribute("aria-hidden", "true");
+    updateImageVisual(slot, item);
+    return slot;
+}
+function refreshImageVisuals(pairKey) {
+    if (!pairKey) return;
+    const item = inventoryItems(state).find((entry) => entry.pair === pairKey);
+    if (!item) return;
+    for (const slot of document.querySelectorAll(".element-visual"))
+        if (slot.dataset.pairKey === pairKey) updateImageVisual(slot, item);
 }
 function positionWithinCanvas(x, y, width = 44, height = 44) {
     const rect = canvas.getBoundingClientRect();
@@ -259,14 +350,11 @@ function renderCanvas(newId = null) {
             String(selected.includes(instance.id)),
         );
         chip.dataset.instance = instance.id;
+        chip.dataset.pairKey = item.discovered ? item.pair : "";
         chip.disabled = busy;
-        const icon = document.createElement("span");
-        icon.className = "chip-icon";
-        icon.textContent = item.icon ?? "✦";
-        icon.setAttribute("aria-hidden", "true");
         const label = document.createElement("span");
         label.textContent = item.name;
-        chip.append(icon, label);
+        chip.append(createElementVisual(item), label);
         chip.addEventListener("focus", () => {
             focusedInstanceId = instance.id;
         });
@@ -318,13 +406,11 @@ function renderInventory() {
         button.className = `inventory-chip${item.discovered ? "" : " is-seed"}`;
         button.dataset.tone = itemTone(item);
         button.dataset.pair = item.pair ?? "";
+        button.dataset.pairKey = item.discovered ? item.pair : "";
         button.disabled = busy;
-        const icon = document.createElement("span");
-        icon.textContent = item.icon ?? "✦";
-        icon.setAttribute("aria-hidden", "true");
         const name = document.createElement("small");
         name.textContent = item.name;
-        button.append(icon, name);
+        button.append(createElementVisual(item), name);
         button.addEventListener("pointerdown", (event) =>
             startInventoryDrag(event, item),
         );
@@ -352,7 +438,6 @@ function placeFromInventory(item, x = null, y = null) {
     if (busy) return;
     generation += 1;
     cancelImageOperation();
-    revokeImage();
     retryTextAvailable = false;
     resultPopover.setAttribute("aria-busy", "false");
     resultPopover.hidden = true;
@@ -559,7 +644,6 @@ function activateInstance(id) {
     if (busy) return;
     generation += 1;
     cancelImageOperation();
-    revokeImage();
     resultPopover.hidden = true;
     resultPopover.setAttribute("aria-busy", "false");
     resultAnchor = null;
@@ -594,23 +678,7 @@ function combineInstances(first, second) {
 function failImageDecode(operation) {
     if (operation.id !== generation || activeImageOperation !== operation)
         return;
-    clearImageTimer(operation);
-    operation.imagePending = false;
-    activeImageOperation = null;
-    revokeImage();
-    resultPopover.setAttribute("aria-busy", "false");
-    announce(
-        `${operation.discovery.name} illustration could not be displayed.`,
-    );
-    openResult(
-        operation.discovery,
-        operation.x,
-        operation.y,
-        "Illustrated",
-        null,
-        true,
-        false,
-    );
+    handleImageFailure(operation.pairKey, operation.imageUrl, operation);
 }
 function startCombination({
     firstItem,
@@ -653,7 +721,6 @@ function startCombination({
     retryTextAvailable = false;
     activePair = pairKey;
     activeDiscovery = operation.discovery;
-    revokeImage();
     resultPopover.hidden = true;
     resultPopover.setAttribute("aria-busy", "false");
     resultAnchor = null;
@@ -703,18 +770,19 @@ function startCombination({
             );
             setBusy(false);
             renderCanvas(resultInstance.id);
+            const cachedImage = imageCache.get(pairKey);
             openResult(
                 operation.discovery,
                 operation.x,
                 operation.y,
                 cached ? "In your book" : "New discovery",
-                null,
+                cachedImage?.url ?? null,
                 false,
                 false,
             );
             announce(`${operation.discovery.name} discovered.`);
             stage = "image";
-            if (key) loadImage(operation, key);
+            if (key && !cachedImage) loadImage(operation, key);
         } catch (error) {
             if (operation.id === generation) {
                 setTextBusy(false);
@@ -737,6 +805,21 @@ async function loadImage(operation, key) {
         promptForKey();
         return;
     }
+    const cached = imageCache.get(operation.pairKey);
+    if (cached) {
+        operation.imageDisplayed = true;
+        operation.imagePending = false;
+        openResult(
+            operation.discovery,
+            operation.x,
+            operation.y,
+            "Illustrated",
+            cached.url,
+            false,
+            false,
+        );
+        return;
+    }
     operation.imagePending = true;
     activeImageOperation = operation;
     resultPopover.setAttribute("aria-busy", "true");
@@ -744,15 +827,16 @@ async function loadImage(operation, key) {
     try {
         const blob = await api.generateImage(operation.discovery, key);
         if (operation.id !== generation) return;
-        revokeImage();
-        activeObjectUrl = URL.createObjectURL(blob);
+        const imageUrl = imageCache.set(operation.pairKey, blob);
+        operation.imageUrl = imageUrl;
+        refreshImageVisuals(operation.pairKey);
         operation.imageDisplayed = true;
         openResult(
             operation.discovery,
             operation.x,
             operation.y,
             "Illustrated",
-            activeObjectUrl,
+            imageUrl,
             false,
             false,
             operation,
@@ -797,6 +881,9 @@ function openResult(
     imageOperation = null,
 ) {
     if (!discovery) return;
+    const pairKey = imageOperation?.pairKey ?? activePair;
+    const cachedUrl = pairKey ? imageCache.peek(pairKey)?.url : null;
+    const displayedImageUrl = imageUrl ?? cachedUrl;
     if (resultPopover.hidden) {
         resultReturnFocus = document.activeElement?.isConnected
             ? document.activeElement
@@ -805,61 +892,79 @@ function openResult(
             document.activeElement?.dataset?.instance ?? null;
     }
     resultPopover.hidden = false;
-    resultPopover.setAttribute("aria-busy", "false");
+    resultPopover.setAttribute(
+        "aria-busy",
+        String(Boolean(imageOperation?.imagePending)),
+    );
     resultAnchor = { x, y };
     resultLabel.textContent = label;
     resultContent.replaceChildren();
-    if (imageUrl) {
-        resultPopover.setAttribute("aria-busy", "true");
+    activePopoverImage = null;
+    if (displayedImageUrl) {
+        const renderToken = ++nextPopoverRenderToken;
+        activePopoverImage = {
+            pairKey,
+            url: displayedImageUrl,
+            token: renderToken,
+            discovery,
+            x,
+            y,
+            label,
+        };
         const image = document.createElement("img");
         image.className = "result-image";
-        image.setAttribute("aria-busy", "true");
-        image.src = imageUrl;
+        image.setAttribute(
+            "aria-busy",
+            String(Boolean(imageOperation?.imagePending)),
+        );
+        image.src = displayedImageUrl;
         image.alt = `${discovery.name} illustration`;
-        image.loading = "lazy";
+        image.loading = "eager";
+        image.decoding = "async";
         image.addEventListener(
             "load",
             () => {
                 if (
-                    imageOperation &&
-                    imageOperation.id === generation &&
-                    activeImageOperation === imageOperation
+                    !pairKey ||
+                    activePair !== pairKey ||
+                    imageCache.peek(pairKey)?.url !== displayedImageUrl ||
+                    activePopoverImage?.token !== renderToken ||
+                    activePopoverImage.image !== image ||
+                    (imageOperation &&
+                        (imageOperation.id !== generation ||
+                            activeImageOperation !== imageOperation))
                 ) {
+                    return;
+                }
+                if (imageOperation) {
                     clearImageTimer(imageOperation);
                     imageOperation.imagePending = false;
                     activeImageOperation = null;
-                    image.setAttribute("aria-busy", "false");
-                    resultPopover.setAttribute("aria-busy", "false");
-                    updateRetryButtons();
-                    announce(`${discovery.name} illustration ready.`);
                 }
+                image.setAttribute("aria-busy", "false");
+                resultPopover.setAttribute("aria-busy", "false");
+                updateRetryButtons();
+                announce(`${discovery.name} illustration ready.`);
             },
             { once: true },
         );
         image.addEventListener(
             "error",
-            () => {
-                if (imageUrl !== activeObjectUrl) return;
-                if (imageOperation && imageOperation.id !== generation) return;
-                clearImageTimer(imageOperation);
-                if (imageOperation) imageOperation.imagePending = false;
-                if (activeImageOperation === imageOperation)
-                    activeImageOperation = null;
-                image.setAttribute("aria-busy", "false");
-                revokeImage();
-                resultPopover.setAttribute("aria-busy", "false");
-                announce(
-                    `${discovery.name} illustration could not be displayed.`,
-                );
-                openResult(discovery, x, y, label, null, true, false);
-            },
+            () =>
+                handleImageFailure(
+                    pairKey,
+                    displayedImageUrl,
+                    imageOperation,
+                    renderToken,
+                    image,
+                ),
             { once: true },
         );
+        activePopoverImage.image = image;
         resultContent.append(image);
     } else {
         const placeholder = document.createElement("div");
         placeholder.className = "result-placeholder";
-        placeholder.textContent = "✦";
         placeholder.setAttribute("aria-hidden", "true");
         resultContent.append(placeholder);
     }
@@ -892,6 +997,7 @@ function openError(error, stage, x, y, discovery = activeDiscovery) {
         resultAnchor = { x, y };
         resultLabel.textContent = "Try again";
         resultContent.replaceChildren();
+        activePopoverImage = null;
         const title = document.createElement("h2");
         title.className = "result-name";
         title.id = "result-title";
@@ -923,9 +1029,9 @@ function closeResult() {
     generation += 1;
     setTextBusy(false);
     resultPopover.hidden = true;
+    activePopoverImage = null;
     resultAnchor = null;
     cancelImageOperation();
-    revokeImage();
     activePair = null;
     activeDiscovery = null;
     activeCombination = null;
@@ -1033,6 +1139,11 @@ retryImage.addEventListener("click", () => {
         activeImageOperation?.imagePending !== true &&
         activeDiscovery
     ) {
+        const key = getKey();
+        if (!isSecretKey(key)) {
+            promptForKey();
+            return;
+        }
         const anchor = resultAnchor ?? { x: 20, y: 62 };
         const operation = {
             id: ++generation,
@@ -1041,7 +1152,8 @@ retryImage.addEventListener("click", () => {
             x: anchor.x,
             y: anchor.y,
         };
-        loadImage(operation, getKey());
+        imageCache.delete(operation.pairKey);
+        loadImage(operation, key);
     }
 });
 retryText.addEventListener("click", () => {
@@ -1066,6 +1178,7 @@ resetButton.addEventListener("click", () => {
         /* storage may be blocked */
     }
     instances = new Map();
+    imageCache.clear();
     nextInstanceId = 0;
     nextZIndex = 0;
     selected = [];
@@ -1102,7 +1215,7 @@ globalThis.addEventListener("resize", () => {
 globalThis.addEventListener("pagehide", () => {
     generation += 1;
     cancelImageOperation();
-    revokeImage();
+    imageCache.clear();
 });
 
 for (const [index, seed] of SEEDS.entries())
