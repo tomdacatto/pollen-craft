@@ -9,11 +9,13 @@ import {
 import {
     canonicalPair,
     createInitialState,
+    displayNameKey,
     findDiscovery,
     gameReducer,
     inventoryItems,
     loadState,
     rectanglesOverlap,
+    resolveInventoryItem,
     SEEDS,
     STORAGE_KEY,
     saveState,
@@ -52,7 +54,7 @@ let suppressInventoryChip = null;
 let inventoryClickReset = null;
 let busy = false;
 let generation = 0;
-let activePair = null;
+let activeImagePair = null;
 let activeDiscovery = null;
 let activePopoverImage = null;
 let resultAnchor = null;
@@ -80,14 +82,52 @@ function announce(message) {
 }
 
 function currentImageOperation() {
-    return activeImageOperation?.pairKey === activePair
+    return activeImageOperation?.imagePairKey === activeImagePair
         ? activeImageOperation
         : null;
 }
 
+function reconcileEvictedImage(pairKey, entry) {
+    const operations = new Set();
+    const cachedOperation = imageOperations.get(pairKey);
+    if (cachedOperation) operations.add(cachedOperation);
+    if (activeImageOperation?.imagePairKey === pairKey)
+        operations.add(activeImageOperation);
+    for (const operation of operations) {
+        clearImageTimer(operation);
+        operation.cancelled = true;
+        operation.imagePending = false;
+        operation.imageDisplayed = false;
+        operation.imageError = true;
+        if (operation.imageUrl === entry.url) operation.imageUrl = null;
+        if (imageOperations.get(pairKey) === operation)
+            imageOperations.delete(pairKey);
+        if (activeImageOperation === operation) activeImageOperation = null;
+    }
+    const popoverImage =
+        !resultPopover.hidden &&
+        activePopoverImage?.pairKey === pairKey &&
+        activePopoverImage.url === entry.url
+            ? activePopoverImage
+            : null;
+    if (popoverImage) {
+        const placeholder = document.createElement("div");
+        placeholder.className = "result-placeholder";
+        placeholder.setAttribute("aria-hidden", "true");
+        if (popoverImage.image?.isConnected)
+            popoverImage.image.replaceWith(placeholder);
+        activePopoverImage = null;
+        resultPopover.setAttribute("aria-busy", "false");
+    }
+    refreshImageVisuals(pairKey);
+    updateRetryButtons();
+}
+
 const imageCache = createImageCache({
-    onEvict(pairKey) {
-        refreshImageVisuals(pairKey);
+    onEvict(pairKey, entry, reason) {
+        if (reason === "evict" || reason === "delete")
+            reconcileEvictedImage(pairKey, entry);
+        else refreshImageVisuals(pairKey);
     },
 });
 function handleImageFailure(
@@ -109,7 +149,7 @@ function handleImageFailure(
         operation ??
         (imageOperations.get(pairKey)?.imageUrl === url
             ? imageOperations.get(pairKey)
-            : activeImageOperation?.pairKey === pairKey &&
+            : activeImageOperation?.imagePairKey === pairKey &&
                 activeImageOperation.imageUrl === url
               ? activeImageOperation
               : null);
@@ -133,10 +173,14 @@ function handleImageFailure(
     if (!popoverImage) return true;
     activePopoverImage = null;
     resultPopover.setAttribute("aria-busy", "false");
+    if (!resultAnchor) {
+        updateRetryButtons();
+        return true;
+    }
     openResult(
         popoverImage.discovery,
-        popoverImage.x,
-        popoverImage.y,
+        resultAnchor.x,
+        resultAnchor.y,
         popoverImage.label,
         null,
         true,
@@ -233,6 +277,9 @@ function promptForKey() {
 }
 function itemById(id) {
     return inventoryItems(state).find((item) => item.id === id) ?? null;
+}
+function discoveryData(item) {
+    return item ? { name: item.name, description: item.description } : null;
 }
 function itemTone(item) {
     const key = item.id ?? item.name;
@@ -344,7 +391,8 @@ function updateRetryButtons() {
     retryImage.disabled =
         busy ||
         currentImageOperation()?.imagePending === true ||
-        !activeDiscovery;
+        !activeDiscovery ||
+        !activeImagePair;
 }
 function setTextBusy(next) {
     canvas.setAttribute("aria-busy", String(next));
@@ -432,10 +480,14 @@ function renderCanvas(newId = null) {
         canvasItems.querySelector(`[data-instance="${focusId}"]`)?.focus();
 }
 function renderInventory() {
-    const query = search.value.trim().toLowerCase();
+    const query = displayNameKey(search.value);
     inventory.replaceChildren();
-    const items = inventoryItems(state).filter((item) =>
-        `${item.name} ${item.description ?? ""}`.toLowerCase().includes(query),
+    const items = inventoryItems(state).filter(
+        (item) =>
+            !query ||
+            `${displayNameKey(item.name)} ${displayNameKey(item.description ?? "")}`.includes(
+                query,
+            ),
     );
     document.querySelector("#inventory-count").textContent = String(
         inventoryItems(state).length,
@@ -491,11 +543,11 @@ function placeFromInventory(item, x = null, y = null) {
     resultAnchor = null;
     focusedPair = item.pair ?? null;
     if (item.discovered) {
-        activePair = item.pair;
+        activeImagePair = item.pair;
         activeDiscovery = findDiscovery(state, item.pair);
         activeImageOperation = imageOperations.get(item.pair) ?? null;
     } else {
-        activePair = null;
+        activeImagePair = null;
         activeDiscovery = null;
         activeImageOperation = null;
     }
@@ -841,7 +893,7 @@ function activateInstance(id) {
     resultPopover.hidden = true;
     resultPopover.setAttribute("aria-busy", "false");
     resultAnchor = null;
-    activePair = null;
+    activeImagePair = null;
     activeDiscovery = null;
     activeImageOperation = null;
     selected = selected.includes(id)
@@ -880,10 +932,10 @@ function failImageDecode(operation) {
     if (
         operation.cancelled ||
         operation.imagePending !== true ||
-        imageOperations.get(operation.pairKey) !== operation
+        imageOperations.get(operation.imagePairKey) !== operation
     )
         return;
-    handleImageFailure(operation.pairKey, operation.imageUrl, operation);
+    handleImageFailure(operation.imagePairKey, operation.imageUrl, operation);
 }
 function startCombination({
     firstItem,
@@ -899,6 +951,11 @@ function startCombination({
     if (busy) return;
     const pairKey = canonicalPair(firstItem.id, secondItem.id);
     const cached = findDiscovery(state, pairKey);
+    const cachedItem = cached
+        ? resolveInventoryItem(state, pairKey, cached)
+        : null;
+    const cachedImagePair = cachedItem?.discovered ? cachedItem.pair : null;
+    const cachedImageDiscovery = discoveryData(cachedItem);
     const key = getKey();
     const model = getTextModel();
     if (!key && !cached) {
@@ -920,12 +977,16 @@ function startCombination({
         y,
         returnFocus,
         returnFocusInstanceId,
+        imagePairKey: cachedImagePair,
+        imageDiscovery: cachedImageDiscovery,
     };
     activeCombination = operation;
     retryTextAvailable = false;
-    activePair = pairKey;
-    activeDiscovery = operation.discovery;
-    activeImageOperation = imageOperations.get(pairKey) ?? null;
+    activeImagePair = cachedImagePair;
+    activeDiscovery = cachedImageDiscovery ?? operation.discovery;
+    activeImageOperation = cachedImagePair
+        ? (imageOperations.get(cachedImagePair) ?? null)
+        : null;
     resultPopover.hidden = true;
     resultPopover.setAttribute("aria-busy", "false");
     resultAnchor = null;
@@ -946,7 +1007,6 @@ function startCombination({
             if (operation.id !== generation) return;
             setTextBusy(false);
             operation.discovery = { ...discovery };
-            activeDiscovery = operation.discovery;
             if (!cached)
                 state = saveState(
                     gameReducer(state, {
@@ -957,13 +1017,23 @@ function startCombination({
                     localStore,
                 );
             renderInventory();
-            const resultItem = inventoryItems(state).find(
-                (item) => item.pair === pairKey,
-            ) ?? {
-                ...discovery,
-                id: `discovery-${encodeURIComponent(pairKey)}`,
-                discovered: true,
-            };
+            const resultItem = resolveInventoryItem(state, pairKey, discovery);
+            if (!resultItem)
+                throw new ApiError(
+                    "The discovered idea could not be placed. Retry the idea.",
+                    "parse",
+                    0,
+                    true,
+                );
+            operation.imagePairKey = resultItem.discovered
+                ? resultItem.pair
+                : null;
+            operation.imageDiscovery = discoveryData(resultItem);
+            activeImagePair = operation.imagePairKey;
+            activeDiscovery = operation.imageDiscovery;
+            activeImageOperation = operation.imagePairKey
+                ? (imageOperations.get(operation.imagePairKey) ?? null)
+                : null;
             for (const sourceId of operation.sourceIds)
                 instances.delete(sourceId);
             operation.sourceIds = [];
@@ -975,25 +1045,28 @@ function startCombination({
             );
             setBusy(false);
             renderCanvas(resultInstance.id);
-            const cachedImage = imageCache.get(pairKey);
+            const cachedImage = operation.imagePairKey
+                ? imageCache.get(operation.imagePairKey)
+                : null;
             if (cached)
                 openResult(
-                    operation.discovery,
+                    activeDiscovery,
                     operation.x,
                     operation.y,
                     "In your book",
                     cachedImage?.url ?? null,
                     false,
                     false,
-                    imageOperations.get(pairKey) ?? null,
+                    activeImageOperation,
                 );
             announce(
                 cached
-                    ? `${operation.discovery.name} is ready from your book.`
-                    : `${operation.discovery.name} discovered and added to your book.`,
+                    ? `${activeDiscovery.name} is ready from your book.`
+                    : `${activeDiscovery.name} discovered and added to your book.`,
             );
             stage = "image";
-            if (key && !cachedImage) loadImage(operation, key);
+            if (key && !cachedImage && operation.imagePairKey)
+                loadImage(operation, key);
         } catch (error) {
             if (operation.id === generation) {
                 setTextBusy(false);
@@ -1010,69 +1083,74 @@ function startCombination({
         }
     })();
 }
+function updateOpenPopoverImage(operation, imageUrl, imageOperation = null) {
+    if (
+        resultPopover.hidden ||
+        activeImagePair !== operation.imagePairKey ||
+        !activeDiscovery ||
+        !resultAnchor
+    )
+        return;
+    openResult(
+        activeDiscovery,
+        resultAnchor.x,
+        resultAnchor.y,
+        "Illustrated",
+        imageUrl,
+        false,
+        false,
+        imageOperation,
+    );
+}
 async function loadImage(operation, key) {
-    if (operation.imagePending || !operation.discovery || operation.cancelled)
+    if (
+        operation.imagePending ||
+        !operation.imagePairKey ||
+        !operation.imageDiscovery ||
+        operation.cancelled
+    )
         return;
     if (!isSecretKey(key)) {
-        if (activePair === operation.pairKey) promptForKey();
+        if (activeImagePair === operation.imagePairKey) promptForKey();
         return;
     }
-    const pending = imageOperations.get(operation.pairKey);
+    const pending = imageOperations.get(operation.imagePairKey);
     if (pending?.imagePending) {
-        if (activePair === operation.pairKey) activeImageOperation = pending;
+        if (activeImagePair === operation.imagePairKey)
+            activeImageOperation = pending;
         updateRetryButtons();
         return;
     }
-    const cached = imageCache.get(operation.pairKey);
+    const cached = imageCache.get(operation.imagePairKey);
     if (cached) {
         operation.imageUrl = cached.url;
         operation.imageDisplayed = true;
         operation.imagePending = false;
-        refreshImageVisuals(operation.pairKey);
-        if (!resultPopover.hidden && activePair === operation.pairKey)
-            openResult(
-                operation.discovery,
-                operation.x,
-                operation.y,
-                "Illustrated",
-                cached.url,
-                false,
-                false,
-                null,
-            );
+        refreshImageVisuals(operation.imagePairKey);
+        updateOpenPopoverImage(operation, cached.url);
         updateRetryButtons();
         return;
     }
     operation.imagePending = true;
     operation.imageDisplayed = false;
     operation.imageError = false;
-    imageOperations.set(operation.pairKey, operation);
-    if (activePair === operation.pairKey) {
+    imageOperations.set(operation.imagePairKey, operation);
+    if (activeImagePair === operation.imagePairKey) {
         activeImageOperation = operation;
         resultPopover.setAttribute("aria-busy", "true");
     }
     updateRetryButtons();
     try {
-        const blob = await api.generateImage(operation.discovery, key);
+        const blob = await api.generateImage(operation.imageDiscovery, key);
         if (
             operation.cancelled ||
-            imageOperations.get(operation.pairKey) !== operation
+            imageOperations.get(operation.imagePairKey) !== operation
         )
             return;
-        const imageUrl = imageCache.set(operation.pairKey, blob);
+        const imageUrl = imageCache.set(operation.imagePairKey, blob);
         operation.imageUrl = imageUrl;
-        refreshImageVisuals(operation.pairKey);
-        if (!resultPopover.hidden && activePair === operation.pairKey)
-            openResult(
-                operation.discovery,
-                operation.x,
-                operation.y,
-                "Illustrated",
-                imageUrl,
-                false,
-                false,
-                operation,
-            );
+        refreshImageVisuals(operation.imagePairKey);
+        updateOpenPopoverImage(operation, imageUrl, operation);
         operation.imageTimer = setTimeout(
             () => failImageDecode(operation),
             IMAGE_DECODE_TIMEOUT_MS,
@@ -1080,27 +1158,31 @@ async function loadImage(operation, key) {
     } catch (error) {
         if (!operation.cancelled) {
             operation.imageError = true;
-            if (!resultPopover.hidden && activePair === operation.pairKey)
+            if (
+                !resultPopover.hidden &&
+                activeImagePair === operation.imagePairKey &&
+                resultAnchor
+            )
                 openError(
                     error,
                     "image",
-                    operation.x,
-                    operation.y,
-                    operation.discovery,
+                    resultAnchor.x,
+                    resultAnchor.y,
+                    activeDiscovery ?? operation.imageDiscovery,
                 );
             else
                 announce(
-                    `${operation.discovery.name} illustration unavailable. Open it to retry the image.`,
+                    `${operation.imageDiscovery.name} illustration unavailable. Open it to retry the image.`,
                 );
         }
     } finally {
         if (operation.cancelled || !operation.imageUrl) {
             operation.imagePending = false;
-            if (imageOperations.get(operation.pairKey) === operation)
-                imageOperations.delete(operation.pairKey);
+            if (imageOperations.get(operation.imagePairKey) === operation)
+                imageOperations.delete(operation.imagePairKey);
             if (activeImageOperation === operation) {
                 activeImageOperation = null;
-                if (activePair === operation.pairKey)
+                if (activeImagePair === operation.imagePairKey)
                     resultPopover.setAttribute("aria-busy", "false");
             }
             updateRetryButtons();
@@ -1118,8 +1200,8 @@ function openResult(
     imageOperation = null,
 ) {
     if (!discovery) return;
-    const pairKey = imageOperation?.pairKey ?? activePair;
-    const cachedUrl = pairKey ? imageCache.peek(pairKey)?.url : null;
+    const imagePairKey = imageOperation?.imagePairKey ?? activeImagePair;
+    const cachedUrl = imagePairKey ? imageCache.peek(imagePairKey)?.url : null;
     const displayedImageUrl = imageUrl ?? cachedUrl;
     if (resultPopover.hidden) {
         resultReturnFocus = document.activeElement?.isConnected
@@ -1140,12 +1222,10 @@ function openResult(
     if (displayedImageUrl) {
         const renderToken = ++nextPopoverRenderToken;
         activePopoverImage = {
-            pairKey,
+            pairKey: imagePairKey,
             url: displayedImageUrl,
             token: renderToken,
             discovery,
-            x,
-            y,
             label,
         };
         const image = document.createElement("img");
@@ -1162,15 +1242,15 @@ function openResult(
             "load",
             () => {
                 if (
-                    !pairKey ||
-                    activePair !== pairKey ||
-                    imageCache.peek(pairKey)?.url !== displayedImageUrl ||
+                    !imagePairKey ||
+                    activeImagePair !== imagePairKey ||
+                    imageCache.peek(imagePairKey)?.url !== displayedImageUrl ||
                     activePopoverImage?.token !== renderToken ||
                     activePopoverImage.image !== image
                 ) {
                     return;
                 }
-                completeImageOperation(pairKey, displayedImageUrl);
+                completeImageOperation(imagePairKey, displayedImageUrl);
                 if (
                     imageOperation &&
                     imageOperation.imageUrl === displayedImageUrl
@@ -1192,7 +1272,7 @@ function openResult(
             "error",
             () =>
                 handleImageFailure(
-                    pairKey,
+                    imagePairKey,
                     displayedImageUrl,
                     imageOperation,
                     renderToken,
@@ -1271,7 +1351,7 @@ function closeResult() {
     resultPopover.hidden = true;
     activePopoverImage = null;
     resultAnchor = null;
-    activePair = null;
+    activeImagePair = null;
     activeDiscovery = null;
     activeCombination = null;
     activeImageOperation = null;
@@ -1294,7 +1374,7 @@ function cancelCombination() {
     setTextBusy(false);
     setBusy(false);
     selected = [];
-    activePair = null;
+    activeImagePair = null;
     activeDiscovery = null;
     activeCombination = null;
     activeImageOperation = null;
@@ -1377,7 +1457,8 @@ retryImage.addEventListener("click", () => {
     if (
         !busy &&
         currentImageOperation()?.imagePending !== true &&
-        activeDiscovery
+        activeDiscovery &&
+        activeImagePair
     ) {
         const key = getKey();
         if (!isSecretKey(key)) {
@@ -1385,15 +1466,18 @@ retryImage.addEventListener("click", () => {
             return;
         }
         const anchor = resultAnchor ?? { x: 20, y: 62 };
+        const imageDiscovery = discoveryData(activeDiscovery);
         const operation = {
             id: ++generation,
-            pairKey: activePair,
-            discovery: { ...activeDiscovery },
+            imagePairKey: activeImagePair,
+            discovery: imageDiscovery,
+            imageDiscovery,
             x: anchor.x,
             y: anchor.y,
             cancelled: false,
         };
-        imageCache.delete(operation.pairKey);
+        imageCache.delete(operation.imagePairKey);
+        activeImageOperation = operation;
         loadImage(operation, key);
     }
 });

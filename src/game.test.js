@@ -13,6 +13,7 @@ import {
     canonicalPair,
     createInitialState,
     deriveImagePrompt,
+    displayNameKey,
     findDiscovery,
     gameReducer,
     inventoryItems,
@@ -22,6 +23,7 @@ import {
     normalizeState,
     parseDiscoveryPayload,
     rectanglesOverlap,
+    resolveInventoryItem,
     STORAGE_KEY,
     saveState,
 } from "./game.js";
@@ -145,6 +147,36 @@ test("image cache keeps one URL for a canonical duplicate pair", () => {
     assert.deepEqual(revoked, []);
 });
 
+test("image cache reports eviction lifecycle once before revoking the URL", () => {
+    const revoked = [];
+    const removals = [];
+    const cache = createImageCache({
+        maxEntries: 1,
+        revokeObjectURL: (url) => revoked.push(url),
+        onEvict: (key, entry, reason) =>
+            removals.push({
+                key,
+                url: entry.url,
+                reason,
+                revoked: [...revoked],
+            }),
+    });
+    cache.set("first", "url-first", 1);
+    cache.set("second", "url-second", 1);
+    assert.deepEqual(removals, [
+        { key: "first", url: "url-first", reason: "evict", revoked: [] },
+    ]);
+    assert.deepEqual(revoked, ["url-first"]);
+    cache.delete("second");
+    assert.deepEqual(removals[1], {
+        key: "second",
+        url: "url-second",
+        reason: "delete",
+        revoked: ["url-first"],
+    });
+    assert.deepEqual(revoked, ["url-first", "url-second"]);
+});
+
 test("image cache can inject object URL creation for blob entries", () => {
     const created = [];
     const cache = createImageCache({
@@ -172,6 +204,9 @@ test("discovery parser requires bounded plain strings", () => {
         { name: "Steam", description: "A bright cloud." },
     );
     assert.throws(() => parseDiscoveryPayload({ name: "", description: "no" }));
+    assert.throws(() =>
+        parseDiscoveryPayload({ name: "\u200b\uFE0F", description: "no" }),
+    );
     assert.throws(() =>
         parseDiscoveryPayload({ name: "A", description: "ok", extra: "nope" }),
     );
@@ -221,6 +256,93 @@ test("state load recovers corruption and bounds discoveries", () => {
     inherited.order = ["toString"];
     assert.equal(normalizeState(inherited).order.length, 0);
     assert.equal(findDiscovery(createInitialState(), "toString"), null);
+});
+
+test("format-only discovery names never enter state", () => {
+    const state = createInitialState();
+    assert.throws(() =>
+        gameReducer(state, {
+            type: "discover",
+            pair: "alpha+beta",
+            discovery: {
+                name: "\u200b\uFE0F",
+                description: "A visually empty name is unusable.",
+            },
+        }),
+    );
+    assert.deepEqual(state, createInitialState());
+    assert.equal(state.order.length, 0);
+    assert.equal(
+        inventoryItems(state).some((item) => item.discovered),
+        false,
+    );
+});
+
+test("state normalization keeps valid pair caches after malformed order entries", () => {
+    const state = normalizeState({
+        version: 2,
+        discoveries: {
+            "fire+water": {
+                name: "Steam",
+                description: "A bright cloud.",
+            },
+            "earth+wind": {
+                name: "Dust",
+                description: "Fine dry particles.",
+            },
+        },
+        order: ["not-a-pair", "fire+water"],
+    });
+    assert.deepEqual(state.order, ["fire+water", "earth+wind"]);
+    assert.equal(findDiscovery(state, "earth+wind")?.name, "Dust");
+});
+
+test("state reload canonicalizes compatibility pair keys without losing caches", () => {
+    const storage = new Map([
+        [
+            STORAGE_KEY,
+            JSON.stringify({
+                version: 2,
+                discoveries: {
+                    "Water + Fire": {
+                        name: "Steam",
+                        description: "A bright cloud.",
+                    },
+                    "Ｅａｒｔｈ + \u200bWind\uFE0F": {
+                        name: "Dust",
+                        description: "Fine dry particles.",
+                    },
+                },
+                order: ["Water+Fire", "Ｅａｒｔｈ + \u200bWind\uFE0F"],
+                lastPair: "Water + Fire",
+            }),
+        ],
+    ]);
+    storage.getItem = storage.get.bind(storage);
+    storage.removeItem = storage.delete.bind(storage);
+    const state = loadState(storage);
+    assert.deepEqual(state.order, ["fire+water", "earth+wind"]);
+    assert.equal(findDiscovery(state, "fire+water")?.name, "Steam");
+    assert.equal(findDiscovery(state, "Water + Fire")?.name, "Steam");
+    assert.equal(findDiscovery(state, "earth+wind")?.name, "Dust");
+    assert.equal(state.lastPair, "fire+water");
+
+    const collision = normalizeState({
+        version: 2,
+        discoveries: {
+            "Water+Fire": {
+                name: "First Steam",
+                description: "The first cached result.",
+            },
+            "fire + water": {
+                name: "Second Steam",
+                description: "The second cached result.",
+            },
+        },
+        order: ["fire + water", "Water+Fire"],
+    });
+    assert.deepEqual(collision.order, ["fire+water"]);
+    assert.equal(findDiscovery(collision, "fire+water")?.name, "Second Steam");
 });
 
 test("v1 cache is ignored while v2 persists and reloads", () => {
@@ -294,6 +416,82 @@ test("discovery IDs encode the complete canonical pair", () => {
         .filter((item) => item.discovered)
         .map((item) => item.id);
     assert.deepEqual(ids, ["discovery-a%2Bb-c", "discovery-a-b%2Bc"]);
+});
+
+test("display names use one stable Unicode-normalized identity key", () => {
+    assert.equal(displayNameKey("  Ｓｔｅａｍ\n  cloud "), "steam cloud");
+    assert.equal(displayNameKey("STEAM   CLOUD"), "steam cloud");
+    assert.equal(
+        displayNameKey("\u200bＳｔｅａｍ\uFE0F  cloud"),
+        "steam cloud",
+    );
+    assert.equal(
+        canonicalPair(" Water\u200b ", "ＦＩＲＥ\uFE0F"),
+        "fire+water",
+    );
+});
+
+test("ASCII inventory search keys match decorated Unicode names", () => {
+    const name = "\u200bＦｌｏｗｅｒ\uFE0F";
+    const query = displayNameKey("flower");
+    assert.equal(displayNameKey(name), "flower");
+    assert.ok(displayNameKey(name).includes(query));
+    assert.equal(displayNameKey("   "), "");
+});
+
+test("inventory keeps the first canonical item while pair recipes stay cached", () => {
+    let state = createInitialState();
+    state = gameReducer(state, {
+        type: "discover",
+        pair: "alpha+beta",
+        discovery: { name: "  Bloom  ", description: "The first bloom." },
+    });
+    state = gameReducer(state, {
+        type: "discover",
+        pair: "gamma+delta",
+        discovery: { name: "Ｂｌｏｏｍ", description: "A later bloom." },
+    });
+    const items = inventoryItems(state).filter(
+        (item) => displayNameKey(item.name) === "bloom",
+    );
+    assert.deepEqual(
+        items.map((item) => item.id),
+        ["discovery-alpha%2Bbeta"],
+    );
+    assert.equal(
+        resolveInventoryItem(
+            state,
+            "delta+gamma",
+            state.discoveries["delta+gamma"],
+        )?.id,
+        "discovery-alpha%2Bbeta",
+    );
+    assert.equal(findDiscovery(state, "alpha+beta")?.name, "Bloom");
+    assert.equal(findDiscovery(state, "delta+gamma")?.name, "Ｂｌｏｏｍ");
+});
+
+test("a discovered seed name keeps the seed visible and does not duplicate it", () => {
+    const state = gameReducer(createInitialState(), {
+        type: "discover",
+        pair: "alpha+beta",
+        discovery: { name: "  FIRE ", description: "A returned spark." },
+    });
+    const fireItems = inventoryItems(state).filter(
+        (item) => displayNameKey(item.name) === "fire",
+    );
+    assert.deepEqual(
+        fireItems.map((item) => item.id),
+        ["fire"],
+    );
+    assert.equal(
+        resolveInventoryItem(
+            state,
+            "alpha+beta",
+            state.discoveries["alpha+beta"],
+        )?.id,
+        "fire",
+    );
+    assert.ok(findDiscovery(state, "alpha+beta"));
 });
 
 test("only bounded sk_ keys are accepted", () => {
@@ -371,7 +569,8 @@ test("text requests dedupe canonical pairs per credential without exposing keys"
     const defaultBody = requestBodies[0];
     assert.equal(defaultBody.max_tokens, 2048);
     assert.equal(defaultBody.reasoning_effort, "none");
-    assert.deepEqual(defaultBody.response_format, {
+    assert.deepEqual(defaultBody.response_format, { type: "json_object" });
+    const schemaBody = {
         type: "json_schema",
         json_schema: {
             name: "pollen_craft_discovery",
@@ -386,22 +585,142 @@ test("text requests dedupe canonical pairs per credential without exposing keys"
                 additionalProperties: false,
             },
         },
-    });
+    };
     assert.equal(Object.hasOwn(requestBodies[2], "reasoning_effort"), false);
-    assert.deepEqual(
-        requestBodies[2].response_format,
-        defaultBody.response_format,
-    );
+    assert.deepEqual(requestBodies[2].response_format, schemaBody);
     assert.equal(Object.hasOwn(requestBodies[3], "reasoning_effort"), false);
     assert.deepEqual(requestBodies[3].response_format, { type: "json_object" });
     assert.equal(requestBodies[4].reasoning_effort, "minimal");
-    assert.deepEqual(
-        requestBodies[4].response_format,
-        defaultBody.response_format,
-    );
+    assert.deepEqual(requestBodies[4].response_format, schemaBody);
     assert.match(requestBodies[0].messages[0].content, /Fire\+Water=>Steam/u);
     assert.doesNotMatch(requestBodies[0].messages[0].content, /surprising/u);
     assert.ok(requestBodies[0].messages[0].content.length <= 1400);
+});
+
+test("model discovery accepts bounded JSON content formats in one request", async () => {
+    const pair = {
+        first: { id: "copper", name: "Copper", description: "metal" },
+        second: { id: "zinc", name: "Zinc", description: "metal" },
+    };
+    const discovery = {
+        name: "Alloy",
+        description: "A useful metal mixture.",
+    };
+    const fence = String.fromCharCode(96).repeat(3);
+    const contents = [
+        [JSON.stringify(discovery), discovery],
+        [`${fence}\n${JSON.stringify(discovery)}\n${fence}`, discovery],
+        [`${fence}json\n${JSON.stringify(discovery)}\n${fence}`, discovery],
+        [`Preamble ${JSON.stringify(discovery)} trailing`, discovery],
+        [
+            [
+                { type: "text", text: '{"name":"All' },
+                {
+                    type: "text",
+                    text: 'oy","description":"A useful metal mixture."}',
+                },
+            ],
+            discovery,
+        ],
+        [JSON.stringify(JSON.stringify(discovery)), discovery],
+        [
+            `Preamble ${JSON.stringify({
+                ...discovery,
+                description: "A useful {metal} mixture.",
+            })} trailing`,
+            { ...discovery, description: "A useful {metal} mixture." },
+        ],
+        [discovery, discovery],
+        [{ text: JSON.stringify(discovery) }, discovery],
+    ];
+    for (const [content, expected] of contents) {
+        let calls = 0;
+        const client = createApiClient(
+            async () => {
+                calls += 1;
+                return new Response(
+                    JSON.stringify({
+                        choices: [
+                            {
+                                finish_reason: "stop",
+                                message: { content },
+                            },
+                        ],
+                    }),
+                    {
+                        status: 200,
+                        headers: { "content-type": "application/json" },
+                    },
+                );
+            },
+            { timeoutMs: 1000 },
+        );
+        assert.deepEqual(
+            await client.discoverText(pair, "sk_test_12345678"),
+            expected,
+        );
+        assert.equal(calls, 1);
+    }
+});
+
+test("ambiguous and invalid model content retries at most once", async () => {
+    const pair = {
+        first: { id: "copper", name: "Copper", description: "metal" },
+        second: { id: "zinc", name: "Zinc", description: "metal" },
+    };
+    const valid = { name: "Alloy", description: "A useful metal mixture." };
+    const contents = [
+        `${JSON.stringify(valid)} ${JSON.stringify({
+            name: "Blend",
+            description: "Another mixture.",
+        })}`,
+        [
+            { type: "text", text: JSON.stringify(valid) },
+            {
+                type: "image_url",
+                image_url: { url: "https://example.invalid" },
+            },
+        ],
+        JSON.stringify(JSON.stringify(JSON.stringify(valid))),
+        JSON.stringify({ name: "Alloy" }),
+        JSON.stringify({ ...valid, extra: "not allowed" }),
+        JSON.stringify({
+            name: "<b>Alloy</b>",
+            description: valid.description,
+        }),
+        JSON.stringify({
+            name: "\u200b\uFE0F",
+            description: valid.description,
+        }),
+        JSON.stringify({ name: "Copper", description: "One input repeated." }),
+    ];
+    for (const content of contents) {
+        let calls = 0;
+        const client = createApiClient(
+            async () => {
+                calls += 1;
+                return new Response(
+                    JSON.stringify({
+                        choices: [
+                            {
+                                finish_reason: "stop",
+                                message: { content },
+                            },
+                        ],
+                    }),
+                    {
+                        status: 200,
+                        headers: { "content-type": "application/json" },
+                    },
+                );
+            },
+            { timeoutMs: 1000 },
+        );
+        await assert.rejects(() =>
+            client.discoverText(pair, "sk_test_12345678"),
+        );
+        assert.equal(calls, 2);
+    }
 });
 
 test("truncated text responses are retryable instead of malformed JSON", async () => {
@@ -504,13 +823,7 @@ test("unrelated plus names pass pair validation", async () => {
         async (_url, options) => {
             const body = JSON.parse(options.body);
             assert.equal(body.model, DEFAULT_TEXT_MODEL);
-            assert.equal(
-                Object.hasOwn(
-                    body.response_format.json_schema.schema.properties.name,
-                    "enum",
-                ),
-                false,
-            );
+            assert.deepEqual(body.response_format, { type: "json_object" });
             return new Response(
                 JSON.stringify({
                     choices: [
@@ -703,10 +1016,7 @@ test("Dust plus Dust is anchored to Sand and rejects Water", async () => {
         async (_url, options) => {
             invalidCalls += 1;
             const body = JSON.parse(options.body);
-            assert.deepEqual(
-                body.response_format.json_schema.schema.properties.name.enum,
-                ["Sand"],
-            );
+            assert.deepEqual(body.response_format, { type: "json_object" });
             return new Response(
                 JSON.stringify({
                     choices: [

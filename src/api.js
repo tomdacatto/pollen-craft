@@ -1,6 +1,7 @@
 import {
     canonicalPair,
     deriveImagePrompt,
+    displayNameKey,
     parseDiscoveryPayload,
 } from "./game.js";
 
@@ -20,6 +21,7 @@ export const TEXT_MODELS = Object.freeze([
 ]);
 export const DEFAULT_TEXT_MODEL = TEXT_MODELS[0].id;
 const TEXT_MODEL_IDS = new Set(TEXT_MODELS.map(({ id }) => id));
+const SCHEMA_TEXT_MODEL_IDS = new Set(["openai-fast", "openai"]);
 const MAX_PROMPT_LENGTH = 1_400;
 const DISCOVERY_RESPONSE_FORMAT = {
     type: "json_schema",
@@ -223,19 +225,163 @@ async function readBoundedBytes(response, limit) {
     return bytes;
 }
 
+function modelOutputError(message) {
+    return new ApiError(message, "parse", 0, true);
+}
+
+function exactDiscoveryObject(value) {
+    return (
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        Object.keys(value).length === 2 &&
+        Object.hasOwn(value, "name") &&
+        Object.hasOwn(value, "description")
+    );
+}
+
+function stripOuterJsonFence(value) {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith("```")) return trimmed;
+    const lineEnd = trimmed.indexOf("\n");
+    const header =
+        lineEnd === -1
+            ? trimmed
+            : trimmed.slice(0, lineEnd).replace(/\r$/u, "");
+    if (header !== "```" && header !== "```json")
+        throw modelOutputError(
+            "The lab returned an invalid idea format. Retry the idea.",
+        );
+    if (!trimmed.endsWith("```"))
+        throw modelOutputError(
+            "The lab returned an invalid idea format. Retry the idea.",
+        );
+    if (trimmed.at(-4) === "`")
+        throw modelOutputError(
+            "The lab returned an invalid idea format. Retry the idea.",
+        );
+    const body = trimmed.slice(lineEnd + 1, -3);
+    return body.endsWith("\r") ? body.slice(0, -1).trim() : body.trim();
+}
+
+function scanJsonObjects(value) {
+    const candidates = [];
+    let start = -1;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < value.length; index += 1) {
+        const character = value[index];
+        if (depth === 0) {
+            if (character === "{") {
+                start = index;
+                depth = 1;
+            }
+            continue;
+        }
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (character === "\\") escaped = true;
+            else if (character === '"') inString = false;
+            continue;
+        }
+        if (character === '"') {
+            inString = true;
+        } else if (character === "{") {
+            depth += 1;
+        } else if (character === "}") {
+            depth -= 1;
+            if (depth === 0) {
+                try {
+                    const candidate = JSON.parse(value.slice(start, index + 1));
+                    if (
+                        candidate &&
+                        typeof candidate === "object" &&
+                        !Array.isArray(candidate)
+                    )
+                        candidates.push(candidate);
+                } catch {
+                    /* The next balanced object may still be a valid candidate. */
+                }
+                start = -1;
+            }
+        }
+    }
+    return candidates;
+}
+
+function parseModelText(value) {
+    if (value.length > MAX_JSON_BYTES)
+        throw modelOutputError(
+            "The lab returned an invalid idea format. Retry the idea.",
+        );
+    const text = stripOuterJsonFence(value);
+    let parsed;
+    try {
+        parsed = JSON.parse(text);
+    } catch {
+        const candidates = scanJsonObjects(text);
+        if (candidates.length !== 1)
+            throw modelOutputError(
+                "The lab returned malformed JSON. Retry the idea.",
+            );
+        return candidates[0];
+    }
+    if (typeof parsed === "string") {
+        try {
+            parsed = JSON.parse(parsed);
+        } catch {
+            throw modelOutputError(
+                "The lab returned malformed JSON. Retry the idea.",
+            );
+        }
+        if (typeof parsed === "string")
+            throw modelOutputError(
+                "The lab returned malformed JSON. Retry the idea.",
+            );
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        throw modelOutputError("The lab returned no idea. Retry the idea.");
+    return parsed;
+}
+
+function extractModelContent(content) {
+    if (typeof content === "string") return parseModelText(content);
+    if (Array.isArray(content)) {
+        let total = 0;
+        const parts = [];
+        for (const part of content) {
+            if (!part || part.type !== "text" || typeof part.text !== "string")
+                throw modelOutputError(
+                    "The lab returned an invalid idea format. Retry the idea.",
+                );
+            total += part.text.length;
+            if (total > MAX_JSON_BYTES)
+                throw modelOutputError(
+                    "The lab returned an invalid idea format. Retry the idea.",
+                );
+            parts.push(part.text);
+        }
+        return parseModelText(parts.join(""));
+    }
+    if (exactDiscoveryObject(content)) return content;
+    if (
+        content &&
+        typeof content === "object" &&
+        !Array.isArray(content) &&
+        Object.keys(content).length === 1 &&
+        Object.hasOwn(content, "text") &&
+        typeof content.text === "string"
+    )
+        return parseModelText(content.text);
+    throw modelOutputError("The lab returned no idea. Retry the idea.");
+}
+
 function normalizeAnchorName(name) {
     return String(name ?? "")
         .normalize("NFKC")
         .toLowerCase()
         .replace(/[^\p{L}\p{N}]+/gu, " ")
-        .trim()
-        .replace(/\s+/gu, " ");
-}
-
-function normalizeExactName(name) {
-    return String(name ?? "")
-        .normalize("NFKC")
-        .toLowerCase()
         .trim()
         .replace(/\s+/gu, " ");
 }
@@ -304,8 +450,8 @@ export function validatePairDiscovery(discovery, pair, anchor) {
             true,
         );
     if (anchor) return discovery;
-    const normalizedNames = ingredientNames.map(normalizeExactName);
-    const candidate = normalizeExactName(discovery.name);
+    const normalizedNames = ingredientNames.map(displayNameKey);
+    const candidate = displayNameKey(discovery.name);
     const namesAreIdentical =
         normalizedNames.length === 2 &&
         normalizedNames[0] === normalizedNames[1];
@@ -365,11 +511,7 @@ export function createApiClient(fetchImpl = globalThis.fetch, options = {}) {
         }
         const requestKey = `${token}\u0000${modelId}`;
         if (credentials.has(requestKey)) return credentials.get(requestKey);
-        const supportsSchema =
-            modelId === "nemotron-3.5-lightning" ||
-            modelId === "openai-fast" ||
-            modelId === "openai";
-        const responseFormat = supportsSchema
+        const responseFormat = SCHEMA_TEXT_MODEL_IDS.has(modelId)
             ? anchor
                 ? {
                       ...DISCOVERY_RESPONSE_FORMAT,
@@ -448,21 +590,15 @@ export function createApiClient(fetchImpl = globalThis.fetch, options = {}) {
                             0,
                             true,
                         );
-                    const content = choice?.message?.content;
-                    if (typeof content !== "string")
-                        throw new ApiError(
-                            "The lab returned no idea.",
-                            "parse",
-                        );
                     let candidate;
                     try {
-                        candidate = JSON.parse(content);
-                    } catch {
-                        throw new ApiError(
+                        candidate = extractModelContent(
+                            choice?.message?.content,
+                        );
+                    } catch (error) {
+                        if (error instanceof ApiError) throw error;
+                        throw modelOutputError(
                             "The lab returned malformed JSON. Retry the idea.",
-                            "parse",
-                            0,
-                            true,
                         );
                     }
                     try {

@@ -16,8 +16,11 @@ export function createImageCache({
         if (!entry) return false;
         entries.delete(key);
         totalBytes -= entry.size;
-        revokeObjectURL?.(entry.url);
-        onEvict?.(key, entry, reason);
+        try {
+            onEvict?.(key, entry, reason);
+        } finally {
+            revokeObjectURL?.(entry.url);
+        }
         return true;
     }
 

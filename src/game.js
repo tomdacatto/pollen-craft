@@ -37,15 +37,17 @@ export const SEEDS = Object.freeze([
 
 const SEED_IDS = new Set(SEEDS.map((seed) => seed.id));
 
+export function displayNameKey(value) {
+    return String(value ?? "")
+        .normalize("NFKC")
+        .replace(/[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu, "")
+        .trim()
+        .replace(/\s+/gu, " ")
+        .toLowerCase();
+}
+
 export function canonicalPair(first, second) {
-    const values = [
-        String(first ?? "")
-            .trim()
-            .toLowerCase(),
-        String(second ?? "")
-            .trim()
-            .toLowerCase(),
-    ];
+    const values = [displayNameKey(first), displayNameKey(second)];
     if (values.some((value) => !value || value.includes("+")))
         throw new Error("A pair needs two valid ingredients.");
     values.sort();
@@ -94,6 +96,7 @@ export function parseDiscoveryPayload(value) {
         typeof value.description === "string" ? value.description.trim() : "";
     if (
         !name ||
+        !displayNameKey(name) ||
         !description ||
         name.length > MAX_NAME_LENGTH ||
         description.length > MAX_DESCRIPTION_LENGTH
@@ -141,6 +144,16 @@ function cleanStoredDiscovery(value) {
     }
 }
 
+function recoverablePairKey(value) {
+    if (typeof value !== "string") return null;
+    const parts = pairFromKey(value);
+    try {
+        return canonicalPair(parts.first, parts.second);
+    } catch {
+        return null;
+    }
+}
+
 export function normalizeState(value) {
     const state = createInitialState();
     if (
@@ -153,29 +166,36 @@ export function normalizeState(value) {
         Array.isArray(value.discoveries)
     )
         return state;
-    const order =
+    const requestedOrder =
         Object.hasOwn(value, "order") && Array.isArray(value.order)
             ? value.order
-            : Object.keys(value.discoveries);
-    for (const key of order) {
-        if (
-            state.order.length >= MAX_DISCOVERIES ||
-            typeof key !== "string" ||
-            !isCanonicalPairKey(key) ||
-            !Object.hasOwn(value.discoveries, key)
-        )
-            break;
-        const discovery = cleanStoredDiscovery(value.discoveries[key]);
-        if (!discovery || Object.hasOwn(state.discoveries, key)) continue;
-        state.discoveries[key] = discovery;
-        state.order.push(key);
+            : [];
+    const discoveryKeys = Object.keys(value.discoveries);
+    const entriesByRawKey = new Map();
+    const firstEntryByPair = new Map();
+    for (const rawKey of discoveryKeys) {
+        const pair = recoverablePairKey(rawKey);
+        if (!pair) continue;
+        const discovery = cleanStoredDiscovery(value.discoveries[rawKey]);
+        if (!discovery) continue;
+        const entry = { pair, discovery };
+        entriesByRawKey.set(rawKey, entry);
+        if (!firstEntryByPair.has(pair)) firstEntryByPair.set(pair, entry);
     }
-    if (
-        Object.hasOwn(value, "lastPair") &&
-        typeof value.lastPair === "string" &&
-        Object.hasOwn(state.discoveries, value.lastPair)
-    )
-        state.lastPair = value.lastPair;
+    const addEntry = (rawKey) => {
+        if (state.order.length >= MAX_DISCOVERIES) return;
+        const pair = recoverablePairKey(rawKey);
+        if (!pair || Object.hasOwn(state.discoveries, pair)) return;
+        const entry = entriesByRawKey.get(rawKey) ?? firstEntryByPair.get(pair);
+        if (!entry) return;
+        state.discoveries[pair] = entry.discovery;
+        state.order.push(pair);
+    };
+    for (const rawKey of requestedOrder) addEntry(rawKey);
+    for (const rawKey of discoveryKeys) addEntry(rawKey);
+    const lastPair = recoverablePairKey(value.lastPair);
+    if (lastPair && Object.hasOwn(state.discoveries, lastPair))
+        state.lastPair = lastPair;
     return state;
 }
 
@@ -248,23 +268,54 @@ export function gameReducer(state, action) {
 }
 
 export function inventoryItems(state) {
-    const discovered = state.order
-        .map((pair) => ({
-            ...state.discoveries[pair],
+    const items = [];
+    const seenNames = new Set();
+    const add = (item) => {
+        const key = displayNameKey(item.name);
+        if (!key || seenNames.has(key)) return;
+        seenNames.add(key);
+        items.push(item);
+    };
+    for (const seed of SEEDS) add({ ...seed, discovered: false });
+    for (const pair of state.order) {
+        const discovery = state.discoveries[pair];
+        if (!discovery) continue;
+        add({
+            ...discovery,
             id: `discovery-${encodeURIComponent(pair)}`,
             pair,
             discovered: true,
-        }))
-        .filter((item) => item.name);
-    return [
-        ...SEEDS.map((seed) => ({ ...seed, discovered: false })),
-        ...discovered,
-    ];
+        });
+    }
+    return items;
+}
+
+export function resolveInventoryItem(state, pair, discovery = null) {
+    const items = inventoryItems(state);
+    let pairKey = null;
+    try {
+        const parts = pairFromKey(pair);
+        pairKey = canonicalPair(parts.first, parts.second);
+    } catch {
+        /* Name resolution can still use a supplied discovery. */
+    }
+    const byPair = items.find((item) => item.discovered && item.pair === pair);
+    if (byPair) return byPair;
+    const canonicalItem = items.find(
+        (item) => item.discovered && item.pair === pairKey,
+    );
+    if (canonicalItem) return canonicalItem;
+    const name = discovery?.name ?? state.discoveries[pairKey]?.name;
+    const key = displayNameKey(name);
+    return key
+        ? (items.find((item) => displayNameKey(item.name) === key) ?? null)
+        : null;
 }
 
 export function findDiscovery(state, pair) {
-    return isCanonicalPairKey(pair) && Object.hasOwn(state.discoveries, pair)
-        ? state.discoveries[pair]
+    const pairKey = recoverablePairKey(pair);
+    return pairKey && Object.hasOwn(state.discoveries, pairKey)
+        ? state.discoveries[pairKey]
         : null;
 }
 
