@@ -14,6 +14,7 @@ import {
     inventoryItems,
     loadState,
     rectanglesOverlap,
+    repairStarterSelfDiscovery,
     resolveInventoryItem,
     SEEDS,
     STORAGE_KEY,
@@ -319,6 +320,23 @@ function renderAuthState() {
 function itemById(id) {
     return inventoryItems(state).find((item) => item.id === id) ?? null;
 }
+
+function repairCachedStarterDiscovery(pairKey, cached) {
+    const repaired = repairStarterSelfDiscovery(pairKey, cached);
+    if (!repaired) return cached;
+    state = saveState(
+        {
+            ...state,
+            discoveries: Object.assign(Object.create(null), state.discoveries, {
+                [pairKey]: repaired,
+            }),
+        },
+        localStore,
+    );
+    imageCache.delete(pairKey);
+    return repaired;
+}
+
 function discoveryData(item) {
     return item ? { name: item.name, description: item.description } : null;
 }
@@ -989,7 +1007,10 @@ function startCombination({
 }) {
     if (busy) return;
     const pairKey = canonicalPair(firstItem.id, secondItem.id);
-    const cached = findDiscovery(state, pairKey);
+    const cached = repairCachedStarterDiscovery(
+        pairKey,
+        findDiscovery(state, pairKey),
+    );
     const cachedItem = cached
         ? resolveInventoryItem(state, pairKey, cached)
         : null;

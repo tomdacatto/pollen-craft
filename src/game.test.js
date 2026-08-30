@@ -17,6 +17,7 @@ import {
     displayNameKey,
     findDiscovery,
     gameReducer,
+    getStarterSelfRecipe,
     inventoryItems,
     loadState,
     MAX_DESCRIPTION_LENGTH,
@@ -25,7 +26,9 @@ import {
     normalizeState,
     parseDiscoveryPayload,
     rectanglesOverlap,
+    repairStarterSelfDiscovery,
     resolveInventoryItem,
+    STARTER_SELF_RECIPES,
     STORAGE_KEY,
     saveState,
 } from "./game.js";
@@ -68,7 +71,12 @@ test("combination prompts prioritize grounded Dust plus Dust and keep records bo
     assert.ok(prompt.length <= 1400);
     assert.match(prompt, /canonical recipe exact/u);
     assert.match(prompt, /Dust\+Dust=>Sand/u);
-    assert.match(prompt, /Fire\+Fire=>Campfire/u);
+    assert.match(prompt, /Fire\+Fire=>Volcano/u);
+    assert.match(prompt, /Water\+Water=>Lake/u);
+    assert.match(prompt, /Earth\+Earth=>Mountain/u);
+    assert.match(prompt, /Wind\+Wind=>Tornado/u);
+    assert.match(prompt, /one final element label/u);
+    assert.match(prompt, /Never include \+, =, arrows/u);
     assert.match(prompt, /Moon\+Ocean=>Tide/u);
     assert.match(prompt, /Book\+Worm=>Bookworm/u);
     assert.match(prompt, /Cat\+Keyboard=>Meme/u);
@@ -79,6 +87,27 @@ test("combination prompts prioritize grounded Dust plus Dust and keep records bo
         /joined list|repeated input|concatenation|vehicle/u,
     );
     assert.match(prompt, /Records: \[first\]/u);
+});
+
+test("starter self recipes use canonical names and safe descriptions", () => {
+    assert.deepEqual(
+        STARTER_SELF_RECIPES.map(({ first, second, name }) => [
+            canonicalPair(first, second),
+            name,
+        ]),
+        [
+            ["fire+fire", "Volcano"],
+            ["water+water", "Lake"],
+            ["earth+earth", "Mountain"],
+            ["wind+wind", "Tornado"],
+        ],
+    );
+    for (const recipe of STARTER_SELF_RECIPES) {
+        assert.deepEqual(
+            getStarterSelfRecipe(canonicalPair(recipe.first, recipe.second)),
+            recipe,
+        );
+    }
 });
 
 test("image prompts are grounded square icons with bounded content", () => {
@@ -267,6 +296,30 @@ test("discovery parser keeps only bounded safe strings", () => {
     }
 });
 
+test("recipe-expression names are rejected while ordinary plus names remain valid", () => {
+    for (const name of [
+        "Mountain + time",
+        "Mountain+time",
+        "Earth => Mountain",
+        "Earth → Mountain",
+        "Earth\nMountain",
+        "Earth\r",
+    ]) {
+        assert.throws(
+            () => parseDiscoveryPayload({ name, description: "A result." }),
+            (error) => error.code === "OUTPUT_RECIPE_EXPRESSION",
+        );
+    }
+    assert.deepEqual(
+        parseDiscoveryPayload({ name: "C++", description: "A language." }),
+        { name: "C++", description: "A language." },
+    );
+    assert.deepEqual(
+        parseDiscoveryPayload({ name: "R&B", description: "A music duo." }),
+        { name: "R&B", description: "A music duo." },
+    );
+});
+
 test("state load recovers corruption and bounds discoveries", () => {
     const storage = new Map([[STORAGE_KEY, "not json"]]);
     storage.getItem = storage.get.bind(storage);
@@ -386,6 +439,74 @@ test("state reload canonicalizes compatibility pair keys without losing caches",
     });
     assert.deepEqual(collision.order, ["fire+water"]);
     assert.equal(findDiscovery(collision, "fire+water")?.name, "Second Steam");
+});
+
+test("v2 normalization repairs only stale starter self caches and preserves state shape", () => {
+    const original = {
+        version: 2,
+        discoveries: {
+            "fire+fire": {
+                name: "Campfire",
+                description: "A small fire.",
+            },
+            "water+water": {
+                name: "Water + water",
+                description: "A repeated recipe.",
+            },
+            "earth+earth": {
+                name: "Mountain + time",
+                description: "An old generated label.",
+            },
+            "wind+wind": {
+                name: "Wind => Tornado",
+                description: "An old generated label.",
+            },
+            "alpha+beta": {
+                name: "Keep Me",
+                description: "An unrelated discovery.",
+            },
+        },
+        order: [
+            "alpha+beta",
+            "fire+fire",
+            "water+water",
+            "earth+earth",
+            "wind+wind",
+        ],
+        lastPair: "earth+earth",
+    };
+    const repaired = normalizeState(original);
+    assert.deepEqual(repaired.order, original.order);
+    assert.equal(repaired.lastPair, original.lastPair);
+    assert.deepEqual(
+        repaired.discoveries["alpha+beta"],
+        original.discoveries["alpha+beta"],
+    );
+    for (const recipe of STARTER_SELF_RECIPES) {
+        const pair = canonicalPair(recipe.first, recipe.second);
+        assert.deepEqual(repaired.discoveries[pair], {
+            name: recipe.name,
+            description: recipe.description,
+        });
+    }
+    assert.deepEqual(normalizeState(repaired), repaired);
+    assert.deepEqual(
+        repairStarterSelfDiscovery("earth+earth", {
+            name: "Mountain + time",
+            description: "A stale label.",
+        }),
+        {
+            name: "Mountain",
+            description: "A mountain is a large natural elevation.",
+        },
+    );
+
+    const storage = new Map();
+    storage.setItem = (key, value) => storage.set(key, value);
+    storage.getItem = storage.get.bind(storage);
+    storage.removeItem = storage.delete.bind(storage);
+    saveState(repaired, storage);
+    assert.deepEqual(loadState(storage), repaired);
 });
 
 test("v1 cache is ignored while v2 persists and reloads", () => {
@@ -1011,8 +1132,8 @@ test("same-item results may contain their ingredient name", async () => {
                             finish_reason: "stop",
                             message: {
                                 content: JSON.stringify({
-                                    name: "Fire",
-                                    description: "A bright flame.",
+                                    name: "Copper",
+                                    description: "A bright metal.",
                                 }),
                             },
                         },
@@ -1027,12 +1148,12 @@ test("same-item results may contain their ingredient name", async () => {
     );
     const result = await client.discoverText(
         {
-            first: { id: "fire", name: "Fire", description: "spark" },
-            second: { id: "fire", name: "Fire", description: "spark" },
+            first: { id: "copper", name: "Copper", description: "metal" },
+            second: { id: "copper", name: "Copper", description: "metal" },
         },
         "sk_test_12345678",
     );
-    assert.equal(result.name, "Fire");
+    assert.equal(result.name, "Copper");
 });
 
 test("unknown identical inputs accept any structurally safe result", async () => {
@@ -1461,6 +1582,49 @@ test("grounded anchor mismatch is rejected without silent correction", async () 
             return true;
         },
     );
+});
+
+test("Earth plus Earth rejects a recipe expression and retries to Mountain", async () => {
+    let calls = 0;
+    const client = createApiClient(
+        async () => {
+            calls += 1;
+            const discovery =
+                calls === 1
+                    ? {
+                          name: "Mountain + time",
+                          description: "A stale recipe expression.",
+                      }
+                    : {
+                          name: "Mountain",
+                          description: "A fresh grounded definition.",
+                      };
+            return new Response(
+                JSON.stringify({
+                    choices: [
+                        {
+                            finish_reason: "stop",
+                            message: { content: JSON.stringify(discovery) },
+                        },
+                    ],
+                }),
+                {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                },
+            );
+        },
+        { timeoutMs: 1000 },
+    );
+    const result = await client.discoverText(
+        {
+            first: { id: "earth", name: "Earth", description: "ground" },
+            second: { id: "earth", name: "Earth", description: "ground" },
+        },
+        "sk_test_12345678",
+    );
+    assert.equal(result.name, "Mountain");
+    assert.equal(calls, 2);
 });
 
 test("image requests validate content type and bounded size", async () => {

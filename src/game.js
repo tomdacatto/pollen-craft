@@ -21,6 +21,8 @@ export const OUTPUT_ERROR_MESSAGES = Object.freeze({
     OUTPUT_DESCRIPTION_TOO_LONG:
         "The lab result description is too long. Retry the idea.",
     OUTPUT_UNSAFE_TEXT: "The lab result contains unsafe text. Retry the idea.",
+    OUTPUT_RECIPE_EXPRESSION:
+        "The lab result name must be one element label, not a recipe expression. Retry the idea.",
     OUTPUT_ANCHOR_MISMATCH:
         "The grounded result did not match its recipe anchor. Retry the idea.",
     OUTPUT_VALIDATION: "The lab result failed validation. Retry the idea.",
@@ -91,6 +93,52 @@ export function canonicalPair(first, second) {
     return values.join("+");
 }
 
+export const STARTER_SELF_RECIPES = Object.freeze([
+    Object.freeze({
+        first: "Fire",
+        second: "Fire",
+        name: "Volcano",
+        description: "A volcano is a vent or mountain formed by erupted magma.",
+    }),
+    Object.freeze({
+        first: "Water",
+        second: "Water",
+        name: "Lake",
+        description: "A lake is a body of water surrounded by land.",
+    }),
+    Object.freeze({
+        first: "Earth",
+        second: "Earth",
+        name: "Mountain",
+        description: "A mountain is a large natural elevation.",
+    }),
+    Object.freeze({
+        first: "Wind",
+        second: "Wind",
+        name: "Tornado",
+        description: "A tornado is a violently rotating column of air.",
+    }),
+]);
+
+const STARTER_SELF_RECIPES_BY_PAIR = new Map(
+    STARTER_SELF_RECIPES.map((recipe) => [
+        canonicalPair(recipe.first, recipe.second),
+        recipe,
+    ]),
+);
+
+export function getStarterSelfRecipe(pairKey) {
+    return typeof pairKey === "string"
+        ? (STARTER_SELF_RECIPES_BY_PAIR.get(pairKey) ?? null)
+        : null;
+}
+
+export function repairStarterSelfDiscovery(pairKey, value) {
+    const recipe = getStarterSelfRecipe(pairKey);
+    if (!recipe || value == null || value?.name === recipe.name) return null;
+    return { name: recipe.name, description: recipe.description };
+}
+
 export function rectanglesOverlap(first, second) {
     return Boolean(
         first &&
@@ -128,6 +176,8 @@ export function parseDiscoveryPayload(value) {
         throw new DiscoveryOutputError("OUTPUT_MISSING_DESCRIPTION");
     if (typeof value.name !== "string" || typeof value.description !== "string")
         throw new DiscoveryOutputError("OUTPUT_FIELD_TYPE");
+    if (/[\r\n]/u.test(value.name))
+        throw new DiscoveryOutputError("OUTPUT_RECIPE_EXPRESSION");
     const name = value.name.trim();
     const description = value.description.trim();
     if (!name) throw new DiscoveryOutputError("OUTPUT_NAME_EMPTY");
@@ -137,6 +187,13 @@ export function parseDiscoveryPayload(value) {
         throw new DiscoveryOutputError("OUTPUT_NAME_TOO_LONG");
     if (description.length > MAX_DESCRIPTION_LENGTH)
         throw new DiscoveryOutputError("OUTPUT_DESCRIPTION_TOO_LONG");
+    if (
+        /(?:=|<\s*[-=]+\s*|[-=]+\s*>|[\u2190-\u21ff\u2794-\u27be\u27f0-\u27ff\u2900-\u297f\u2b00-\u2bff\u{1f800}-\u{1f8ff}])/u.test(
+            name,
+        ) ||
+        /[\p{L}\p{N}]\s*\+\s*[\p{L}\p{N}]/u.test(name)
+    )
+        throw new DiscoveryOutputError("OUTPUT_RECIPE_EXPRESSION");
     const text = `${name}${description}`;
     if (
         text.includes("<") ||
@@ -214,7 +271,13 @@ export function normalizeState(value) {
     for (const rawKey of discoveryKeys) {
         const pair = recoverablePairKey(rawKey);
         if (!pair) continue;
-        const discovery = cleanStoredDiscovery(value.discoveries[rawKey]);
+        const rawDiscovery = value.discoveries[rawKey];
+        const repairedDiscovery = repairStarterSelfDiscovery(
+            pair,
+            rawDiscovery,
+        );
+        const discovery =
+            repairedDiscovery ?? cleanStoredDiscovery(rawDiscovery);
         if (!discovery) continue;
         const entry = { pair, discovery };
         entriesByRawKey.set(rawKey, entry);
