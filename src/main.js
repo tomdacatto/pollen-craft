@@ -26,6 +26,7 @@ import {
     initializeOAuthStorage,
     OAuthError,
 } from "./oauth.js";
+import { createMergeOperationRegistry } from "./operation-state.js";
 
 const localStore = safeStorage("localStorage");
 const tabStore = safeStorage("sessionStorage");
@@ -79,9 +80,7 @@ let resultReturnInstanceId = null;
 let activeCombination = null;
 let activeImageOperation = null;
 const imageOperations = new Map();
-const combinationOperations = new Map();
-const pairOperations = new Map();
-const claimedInstanceIds = new Set();
+const combinationOperations = createMergeOperationRegistry();
 const pendingResults = new Map();
 let retryTextAvailable = false;
 let nextInstanceId = 0;
@@ -452,32 +451,25 @@ function operationIsCurrent(operation) {
     );
 }
 function instanceIsClaimed(id) {
-    return claimedInstanceIds.has(id);
+    return combinationOperations.isClaimed(id);
 }
 function releaseCombination(operation, preserveSourceIds = false) {
-    const sourceIds = [...operation.sourceIds];
-    combinationOperations.delete(operation.id);
-    if (pairOperations.get(operation.pairKey) === operation)
-        pairOperations.delete(operation.pairKey);
-    for (const id of sourceIds) claimedInstanceIds.delete(id);
-    operation.sourceIds = preserveSourceIds ? sourceIds : [];
+    combinationOperations.finish(operation, {
+        preserveSources: preserveSourceIds,
+    });
     pendingResults.delete(operation.id);
     setTextBusy(combinationOperations.size > 0);
     renderCanvas();
 }
 function cancelCombinationOperation(operation) {
-    if (!operation || !combinationOperations.has(operation.id)) return;
-    operation.cancelled = true;
-    releaseCombination(operation);
+    if (!operation || !combinationOperations.get(operation.id)) return;
+    combinationOperations.cancel(operation);
+    pendingResults.delete(operation.id);
+    setTextBusy(combinationOperations.size > 0);
+    renderCanvas();
 }
 function cancelAllCombinationOperations() {
-    for (const operation of [...combinationOperations.values()]) {
-        operation.cancelled = true;
-        releaseCombination(operation);
-    }
-    combinationOperations.clear();
-    pairOperations.clear();
-    claimedInstanceIds.clear();
+    combinationOperations.cancelAll();
     pendingResults.clear();
     setTextBusy(combinationOperations.size > 0);
     renderCanvas();
@@ -1048,7 +1040,7 @@ function startCombination({
     returnFocusInstanceId = document.activeElement?.dataset?.instance ?? null,
 }) {
     const pairKey = canonicalPair(firstItem.id, secondItem.id);
-    const existing = pairOperations.get(pairKey);
+    const existing = combinationOperations.getByPair(pairKey);
     if (existing && operationIsCurrent(existing)) return;
     const cached = findDiscovery(state, pairKey);
     const cachedItem = cached
@@ -1081,10 +1073,7 @@ function startCombination({
         imagePairKey: cachedImagePair,
         imageDiscovery: cachedImageDiscovery,
     };
-    combinationOperations.set(operation.id, operation);
-    pairOperations.set(pairKey, operation);
-    for (const sourceId of operation.sourceIds)
-        claimedInstanceIds.add(sourceId);
+    if (!combinationOperations.begin(operation)) return;
     pendingResults.set(operation.id, {
         operationId: operation.id,
         x: operation.x,

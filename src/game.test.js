@@ -31,6 +31,70 @@ import {
     saveState,
 } from "./game.js";
 import { createImageCache } from "./image-cache.js";
+import { createMergeOperationRegistry } from "./operation-state.js";
+
+test("merge operation registry allows disjoint work and blocks overlap", () => {
+    const registry = createMergeOperationRegistry();
+    const waterFire = {
+        id: 1,
+        pairKey: "fire+water",
+        sourceIds: ["water", "fire"],
+    };
+    const windEarth = {
+        id: 2,
+        pairKey: "earth+wind",
+        sourceIds: ["wind", "earth"],
+    };
+    assert.equal(registry.begin(waterFire), true);
+    assert.equal(registry.begin(windEarth), true);
+    assert.equal(
+        registry.begin({
+            id: 3,
+            pairKey: "air+water",
+            sourceIds: ["water", "air"],
+        }),
+        false,
+    );
+    assert.equal(
+        registry.begin({
+            id: 4,
+            pairKey: "fire+water",
+            sourceIds: ["other", "source"],
+        }),
+        false,
+    );
+    assert.equal(registry.size, 2);
+});
+
+test("merge operation registry preserves failed sources and rejects stale responses", () => {
+    const registry = createMergeOperationRegistry();
+    const operation = {
+        id: 1,
+        pairKey: "fire+water",
+        sourceIds: ["fire", "water"],
+    };
+    assert.equal(registry.begin(operation), true);
+    registry.finish(operation, { preserveSources: true });
+    assert.deepEqual(operation.sourceIds, ["fire", "water"]);
+    assert.equal(registry.isCurrent(operation), false);
+    assert.equal(registry.isClaimed("fire"), false);
+    const retry = {
+        id: 2,
+        pairKey: "fire+water",
+        sourceIds: ["fire", "water"],
+    };
+    assert.equal(registry.begin(retry), true);
+    registry.invalidate();
+    assert.equal(registry.isCurrent(retry), false);
+    assert.equal(registry.isClaimed("fire"), false);
+    const afterReset = {
+        id: 3,
+        pairKey: "fire+water",
+        sourceIds: ["fire", "water"],
+    };
+    assert.equal(registry.begin(afterReset), true);
+    assert.equal(registry.begin(afterReset), false);
+});
 
 test("canonicalPair makes combinations order-independent", () => {
     assert.equal(canonicalPair(" Water ", "FIRE"), "fire+water");
