@@ -318,6 +318,27 @@ test("image cache replacement, delete, and clear revoke each URL once", () => {
     assert.deepEqual(revoked, ["url-old", "url-new", "url-one", "url-two"]);
 });
 
+test("stale detached same-pair image renders cannot claim a replacement cache", () => {
+    const cache = createImageCache({ revokeObjectURL: () => {} });
+    const firstEntry = cache.set("fire+water", "url-old", 1);
+    const detachedImage = { isConnected: false };
+    cache.set("fire+water", "url-new", 1);
+
+    const staleCallbackIsCurrent =
+        detachedImage.isConnected && cache.peek("fire+water") === firstEntry;
+    assert.equal(staleCallbackIsCurrent, false);
+    assert.equal(cache.peek("fire+water")?.url, "url-new");
+});
+
+test("background image failures retain the failing operation anchor", () => {
+    const visiblePopoverAnchor = { x: 160, y: 180 };
+    const operation = { x: 24, y: 46 };
+    const failureAnchor = { x: operation.x, y: operation.y };
+
+    assert.notDeepEqual(failureAnchor, visiblePopoverAnchor);
+    assert.deepEqual(failureAnchor, { x: 24, y: 46 });
+});
+
 test("image cache keeps one URL for a canonical duplicate pair", () => {
     const revoked = [];
     const cache = createImageCache({

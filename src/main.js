@@ -89,6 +89,7 @@ const combinationOperations = createMergeOperationRegistry();
 const pendingResults = new Map();
 const failedResults = new Map();
 const imageFailures = new Map();
+const imageAnchors = new Map();
 let retryTextAvailable = false;
 let nextInstanceId = 0;
 let nextOperationId = 0;
@@ -246,8 +247,12 @@ function handleImageFailure(
     operation = null,
     renderToken = null,
     renderedImage = null,
+    cacheEntry = null,
 ) {
     if (operation && imageOperations.get(pairKey) !== operation) return false;
+    if (cacheEntry !== null && imageCache.peek(pairKey) !== cacheEntry)
+        return false;
+    if (renderedImage && !renderedImage.isConnected) return false;
     if (
         renderToken !== null &&
         (!popoverMatches({ token: renderToken, pairKey }) ||
@@ -286,18 +291,22 @@ function handleImageFailure(
             : null;
     imageCache.delete(pairKey);
     const item = itemByPair(pairKey);
+    const anchor = activeOperation
+        ? { x: activeOperation.x, y: activeOperation.y }
+        : imageAnchors.get(pairKey);
     imageFailures.set(`image:${pairKey}`, {
         id: `image:${pairKey}`,
         pairKey,
         stage: "image",
         discovery: popoverImage?.discovery ?? discoveryData(item),
         operation: activeOperation,
-        x: resultAnchor?.x ?? 20,
-        y: resultAnchor?.y ?? 62,
+        x: anchor?.x ?? 20,
+        y: anchor?.y ?? 62,
         label: `${(popoverImage?.discovery ?? discoveryData(item))?.name ?? "Illustration"} illustration unavailable — retry`,
     });
     if (!popoverImage) {
         refreshImageVisuals(pairKey);
+        renderCanvas();
         return true;
     }
     activePopoverImage = null;
@@ -460,7 +469,7 @@ function itemTone(item) {
     );
     return ["lavender", "periwinkle", "mint", "lime"][score % 4];
 }
-function imageElement(url, pairKey) {
+function imageElement(url, pairKey, cacheEntry = imageCache.peek(pairKey)) {
     const image = document.createElement("img");
     image.src = url;
     image.alt = "";
@@ -470,7 +479,13 @@ function imageElement(url, pairKey) {
     image.addEventListener(
         "load",
         () => {
-            if (imageCache.peek(pairKey)?.url !== url) return;
+            if (
+                !image.isConnected ||
+                image.closest(".element-visual")?.dataset.pairKey !== pairKey ||
+                imageCache.peek(pairKey) !== cacheEntry ||
+                cacheEntry?.url !== url
+            )
+                return;
             image
                 .closest(".element-visual")
                 ?.classList.remove("is-placeholder");
@@ -480,16 +495,27 @@ function imageElement(url, pairKey) {
         },
         { once: true },
     );
-    image.addEventListener("error", () => handleImageFailure(pairKey, url), {
-        once: true,
-    });
+    image.addEventListener(
+        "error",
+        () => {
+            if (
+                !image.isConnected ||
+                image.closest(".element-visual")?.dataset.pairKey !== pairKey ||
+                imageCache.peek(pairKey) !== cacheEntry ||
+                cacheEntry?.url !== url
+            )
+                return;
+            handleImageFailure(pairKey, url, null, null, image, cacheEntry);
+        },
+        { once: true },
+    );
     return image;
 }
 function updateImageVisual(slot, item) {
     const cached = item.discovered ? imageCache.get(item.pair) : null;
     slot.classList.toggle("is-placeholder", !cached && item.discovered);
     slot.replaceChildren();
-    if (cached) slot.append(imageElement(cached.url, item.pair));
+    if (cached) slot.append(imageElement(cached.url, item.pair, cached));
     else if (!item.discovered) {
         const icon = document.createElement("span");
         icon.textContent = item.icon ?? "";
@@ -1469,6 +1495,10 @@ async function loadImage(operation, key) {
         operation.cancelled
     )
         return;
+    imageAnchors.set(operation.imagePairKey, {
+        x: operation.x,
+        y: operation.y,
+    });
     if (!key) {
         if (activeImagePair === operation.imagePairKey) promptForKey();
         return;
@@ -1577,6 +1607,9 @@ function openResult(
     const imagePairKey = imageOperation?.imagePairKey ?? activeImagePair;
     const cachedUrl = imagePairKey ? imageCache.get(imagePairKey)?.url : null;
     const displayedImageUrl = imageUrl ?? cachedUrl;
+    const displayedImageEntry = imagePairKey
+        ? imageCache.peek(imagePairKey)
+        : null;
     if (imagePairKey) {
         activeImagePair = imagePairKey;
         activeDiscovery = discovery;
@@ -1640,11 +1673,13 @@ function openResult(
             "load",
             () => {
                 if (
+                    !image.isConnected ||
                     !imagePairKey ||
                     !popoverMatches({
                         token: renderToken,
                         pairKey: imagePairKey,
                     }) ||
+                    imageCache.peek(imagePairKey) !== displayedImageEntry ||
                     imageCache.peek(imagePairKey)?.url !== displayedImageUrl ||
                     activePopoverImage?.token !== renderToken ||
                     activePopoverImage.image !== image
@@ -1679,6 +1714,7 @@ function openResult(
                     imageOperation,
                     renderToken,
                     image,
+                    displayedImageEntry,
                 ),
             { once: true },
         );
