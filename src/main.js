@@ -12,9 +12,9 @@ import {
     findDiscovery,
     gameReducer,
     inventoryItems,
+    LEGACY_STORAGE_KEY,
     loadState,
     rectanglesOverlap,
-    repairStarterSelfDiscovery,
     resolveInventoryItem,
     SEEDS,
     STORAGE_KEY,
@@ -319,22 +319,6 @@ function renderAuthState() {
 }
 function itemById(id) {
     return inventoryItems(state).find((item) => item.id === id) ?? null;
-}
-
-function repairCachedStarterDiscovery(pairKey, cached) {
-    const repaired = repairStarterSelfDiscovery(pairKey, cached);
-    if (!repaired) return cached;
-    state = saveState(
-        {
-            ...state,
-            discoveries: Object.assign(Object.create(null), state.discoveries, {
-                [pairKey]: repaired,
-            }),
-        },
-        localStore,
-    );
-    imageCache.delete(pairKey);
-    return repaired;
 }
 
 function discoveryData(item) {
@@ -1007,10 +991,7 @@ function startCombination({
 }) {
     if (busy) return;
     const pairKey = canonicalPair(firstItem.id, secondItem.id);
-    const cached = repairCachedStarterDiscovery(
-        pairKey,
-        findDiscovery(state, pairKey),
-    );
+    const cached = findDiscovery(state, pairKey);
     const cachedItem = cached
         ? resolveInventoryItem(state, pairKey, cached)
         : null;
@@ -1593,10 +1574,12 @@ resetButton.addEventListener("click", () => {
     cancelActiveDrags();
     cancelAllImageOperations();
     state = createInitialState();
-    try {
-        localStore?.removeItem(STORAGE_KEY);
-    } catch {
-        /* storage may be blocked */
+    for (const key of [STORAGE_KEY, LEGACY_STORAGE_KEY]) {
+        try {
+            localStore?.removeItem(key);
+        } catch {
+            /* storage may be blocked */
+        }
     }
     instances = new Map();
     imageCache.clear();
