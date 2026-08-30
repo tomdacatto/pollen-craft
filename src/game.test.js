@@ -31,7 +31,10 @@ import {
     saveState,
 } from "./game.js";
 import { createImageCache } from "./image-cache.js";
-import { createMergeOperationRegistry } from "./operation-state.js";
+import {
+    createMergeOperationRegistry,
+    createPopoverBinding,
+} from "./operation-state.js";
 
 test("merge operation registry allows disjoint work and blocks overlap", () => {
     const registry = createMergeOperationRegistry();
@@ -94,6 +97,76 @@ test("merge operation registry preserves failed sources and rejects stale respon
     };
     assert.equal(registry.begin(afterReset), true);
     assert.equal(registry.begin(afterReset), false);
+});
+
+test("image retry rebinds the open popover before stale callbacks can render", () => {
+    const popover = createPopoverBinding();
+    const previous = { id: 1, imagePairKey: "fire+water" };
+    const retry = { id: 2, imagePairKey: "fire+water" };
+    const previousBinding = popover.bind({
+        kind: "operation",
+        operationId: previous.id,
+        pairKey: previous.imagePairKey,
+    });
+    const retryBinding = popover.bind({
+        kind: "operation",
+        operationId: retry.id,
+        pairKey: retry.imagePairKey,
+    });
+
+    assert.notEqual(retryBinding.token, previousBinding.token);
+    assert.equal(
+        popover.matches({
+            token: previousBinding.token,
+            pairKey: previous.imagePairKey,
+        }),
+        false,
+    );
+    assert.equal(
+        popover.matches({
+            token: retryBinding.token,
+            operationId: retry.id,
+            pairKey: retry.imagePairKey,
+        }),
+        true,
+    );
+});
+
+test("idea retry keeps the open popover on the retried operation", () => {
+    const popover = createPopoverBinding();
+    const previous = popover.bind({
+        kind: "operation",
+        operationId: 11,
+    });
+    const retry = popover.bind({
+        kind: "operation",
+        operationId: 12,
+    });
+
+    assert.equal(
+        popover.matches({ token: previous.token, operationId: 11 }),
+        false,
+    );
+    assert.notEqual(retry.token, previous.token);
+    assert.equal(popover.matches({ operationId: 12 }), true);
+
+    const completed = popover.bind({
+        kind: "operation",
+        operationId: 12,
+        pairKey: "fire+steam",
+    });
+    assert.equal(
+        popover.matches({
+            token: completed.token,
+            operationId: 12,
+            pairKey: "fire+steam",
+        }),
+        true,
+    );
+    assert.equal(
+        popover.matches({ operationId: 11, pairKey: "fire+steam" }),
+        false,
+    );
 });
 
 test("canonicalPair makes combinations order-independent", () => {

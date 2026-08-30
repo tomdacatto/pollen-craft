@@ -80,3 +80,39 @@ export function createMergeOperationRegistry() {
         },
     };
 }
+
+export function createPopoverBinding() {
+    let token = 0;
+    let binding = null;
+
+    return {
+        bind({ kind, pairKey = null, operationId = null }) {
+            binding = {
+                kind,
+                pairKey,
+                operationId,
+                token: ++token,
+            };
+            return binding;
+        },
+        matches({
+            token: expectedToken = null,
+            pairKey = null,
+            operationId = null,
+        } = {}) {
+            if (!binding) return false;
+            if (expectedToken !== null && binding.token !== expectedToken)
+                return false;
+            if (pairKey !== null && binding.pairKey !== pairKey) return false;
+            if (operationId !== null && binding.operationId !== operationId)
+                return false;
+            return true;
+        },
+        clear() {
+            binding = null;
+        },
+        get current() {
+            return binding;
+        },
+    };
+}

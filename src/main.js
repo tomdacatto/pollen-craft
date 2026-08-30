@@ -26,7 +26,10 @@ import {
     initializeOAuthStorage,
     OAuthError,
 } from "./oauth.js";
-import { createMergeOperationRegistry } from "./operation-state.js";
+import {
+    createMergeOperationRegistry,
+    createPopoverBinding,
+} from "./operation-state.js";
 
 const localStore = safeStorage("localStorage");
 const tabStore = safeStorage("sessionStorage");
@@ -80,7 +83,7 @@ let resultReturnFocus = null;
 let resultReturnInstanceId = null;
 let activeCombination = null;
 let activeImageOperation = null;
-let resultBinding = null;
+const popoverBinding = createPopoverBinding();
 const imageOperations = new Map();
 const combinationOperations = createMergeOperationRegistry();
 const pendingResults = new Map();
@@ -90,7 +93,6 @@ let retryTextAvailable = false;
 let nextInstanceId = 0;
 let nextOperationId = 0;
 let nextZIndex = 0;
-let nextPopoverRenderToken = 0;
 
 function safeStorage(name) {
     try {
@@ -108,28 +110,27 @@ function popoverMatches({
     pairKey = null,
     operationId = null,
 } = {}) {
-    if (resultPopover.hidden || !resultBinding) return false;
-    if (token !== null && resultBinding.token !== token) return false;
-    if (pairKey !== null && resultBinding.pairKey !== pairKey) return false;
-    if (operationId !== null && resultBinding.operationId !== operationId)
-        return false;
-    return true;
+    return (
+        !resultPopover.hidden &&
+        popoverBinding.matches({ token, pairKey, operationId })
+    );
 }
 
 function bindPopover({ kind, pairKey = null, operationId = null }) {
-    const binding = {
-        kind,
-        pairKey,
-        operationId,
-        token: ++nextPopoverRenderToken,
-    };
-    resultBinding = binding;
-    return binding;
+    return popoverBinding.bind({ kind, pairKey, operationId });
 }
 
 function clearPopoverBinding() {
-    resultBinding = null;
+    popoverBinding.clear();
     activePopoverImage = null;
+}
+
+function rebindOpenPopover({ operationId, pairKey = null } = {}) {
+    if (resultPopover.hidden || !resultAnchor || !popoverBinding.current)
+        return false;
+    bindPopover({ kind: "operation", operationId, pairKey });
+    resultPopover.setAttribute("aria-busy", "true");
+    return true;
 }
 
 function currentImageOperation() {
@@ -266,7 +267,7 @@ function handleImageFailure(
         true,
         false,
         activeOperation,
-        resultBinding,
+        popoverBinding.current,
     );
     announce(
         `${popoverImage.discovery.name} illustration could not be displayed.`,
@@ -1188,6 +1189,7 @@ function startCombination({
         ? document.activeElement
         : null,
     returnFocusInstanceId = document.activeElement?.dataset?.instance ?? null,
+    rebindPopover = false,
 }) {
     const pairKey = canonicalPair(firstItem.id, secondItem.id);
     const existing = combinationOperations.getByPair(pairKey);
@@ -1220,10 +1222,13 @@ function startCombination({
         y,
         returnFocus,
         returnFocusInstanceId,
+        rebindPopover,
         imagePairKey: cachedImagePair,
         imageDiscovery: cachedImageDiscovery,
     };
     if (!combinationOperations.begin(operation)) return;
+    if (rebindPopover)
+        rebindOpenPopover({ operationId: operation.id, pairKey: null });
     pendingResults.set(operation.id, {
         operationId: operation.id,
         x: operation.x,
@@ -1313,18 +1318,24 @@ function startCombination({
             const cachedImage = operation.imagePairKey
                 ? imageCache.get(operation.imagePairKey)
                 : null;
-            if (cached && activeCombination === operation)
+            if (
+                (cached || operation.rebindPopover) &&
+                activeCombination === operation
+            ) {
                 openResult(
-                    activeDiscovery,
+                    operation.rebindPopover
+                        ? operation.discovery
+                        : activeDiscovery,
                     operation.x,
                     operation.y,
-                    "In your book",
+                    cached ? "In your book" : "Discovery",
                     cachedImage?.url ?? null,
                     false,
                     false,
                     activeImageOperation,
                     operation,
                 );
+            }
             if (activeCombination === operation)
                 announce(
                     cached
@@ -1384,8 +1395,8 @@ function updateOpenPopoverImage(operation, imageUrl, imageOperation = null) {
     )
         return;
     const boundToOperation =
-        resultBinding.operationId === operation.id ||
-        resultBinding.kind === "discovery";
+        popoverBinding.current?.operationId === operation.id ||
+        popoverBinding.current?.kind === "discovery";
     if (!boundToOperation) return;
     openResult(
         activeDiscovery,
@@ -1396,7 +1407,7 @@ function updateOpenPopoverImage(operation, imageUrl, imageOperation = null) {
         false,
         false,
         imageOperation,
-        resultBinding,
+        popoverBinding.current,
     );
 }
 async function loadImage(operation, key) {
@@ -1871,6 +1882,10 @@ retryImage.addEventListener("click", () => {
             y: anchor.y,
             cancelled: false,
         };
+        rebindOpenPopover({
+            operationId: operation.id,
+            pairKey: operation.imagePairKey,
+        });
         imageCache.delete(operation.imagePairKey);
         activeImageOperation = operation;
         loadImage(operation, key);
@@ -1886,6 +1901,9 @@ retryText.addEventListener("click", () => {
             y: activeCombination.y,
             returnFocus: activeCombination.returnFocus,
             returnFocusInstanceId: activeCombination.returnFocusInstanceId,
+            rebindPopover: popoverMatches({
+                operationId: activeCombination.id,
+            }),
         });
 });
 resetButton.addEventListener("click", () => {
