@@ -214,11 +214,16 @@ button:disabled { cursor: wait; opacity: .55; }
     outline: 2px dashed var(--lavender-strong);
     outline-offset: 3px;
 }
+.canvas-chip[aria-disabled="true"] { cursor: wait; }
 .canvas-chip.pending-result {
     border-style: dashed;
     background: var(--lime);
     cursor: wait;
     animation: pendingPulse 1.1s ease-in-out infinite;
+}
+.canvas-chip.failure-result {
+    border-style: dashed;
+    background: var(--lavender);
 }
 .pending-result .element-visual { border-style: dashed; }
 .merge-animation {

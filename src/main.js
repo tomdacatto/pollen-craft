@@ -50,6 +50,7 @@ const settingsDialog = document.querySelector("#settings-dialog");
 const helpDialog = document.querySelector("#help-dialog");
 const resetButton = document.querySelector("#reset-game");
 const IMAGE_DECODE_TIMEOUT_MS = 15_000;
+const MAX_CANVAS_INSTANCES = 80;
 const TEXT_MODEL_STORAGE_KEY = "pollen-craft:text-model:v2";
 const oauth = createOAuthClient({
     storage: tabStore,
@@ -79,9 +80,12 @@ let resultReturnFocus = null;
 let resultReturnInstanceId = null;
 let activeCombination = null;
 let activeImageOperation = null;
+let resultBinding = null;
 const imageOperations = new Map();
 const combinationOperations = createMergeOperationRegistry();
 const pendingResults = new Map();
+const failedResults = new Map();
+const imageFailures = new Map();
 let retryTextAvailable = false;
 let nextInstanceId = 0;
 let nextOperationId = 0;
@@ -97,6 +101,35 @@ function safeStorage(name) {
 }
 function announce(message) {
     live.textContent = message;
+}
+
+function popoverMatches({
+    token = null,
+    pairKey = null,
+    operationId = null,
+} = {}) {
+    if (resultPopover.hidden || !resultBinding) return false;
+    if (token !== null && resultBinding.token !== token) return false;
+    if (pairKey !== null && resultBinding.pairKey !== pairKey) return false;
+    if (operationId !== null && resultBinding.operationId !== operationId)
+        return false;
+    return true;
+}
+
+function bindPopover({ kind, pairKey = null, operationId = null }) {
+    const binding = {
+        kind,
+        pairKey,
+        operationId,
+        token: ++nextPopoverRenderToken,
+    };
+    resultBinding = binding;
+    return binding;
+}
+
+function clearPopoverBinding() {
+    resultBinding = null;
+    activePopoverImage = null;
 }
 
 function currentImageOperation() {
@@ -117,13 +150,23 @@ function reconcileEvictedImage(pairKey, entry) {
         operation.imagePending = false;
         operation.imageDisplayed = false;
         operation.imageError = true;
+        imageFailures.set(`image:${pairKey}`, {
+            id: `image:${pairKey}`,
+            pairKey,
+            stage: "image",
+            discovery: operation.imageDiscovery,
+            operation,
+            x: operation.x ?? 20,
+            y: operation.y ?? 62,
+            label: `${operation.imageDiscovery?.name ?? "Illustration"} illustration unavailable — retry`,
+        });
         if (operation.imageUrl === entry.url) operation.imageUrl = null;
         if (imageOperations.get(pairKey) === operation)
             imageOperations.delete(pairKey);
         if (activeImageOperation === operation) activeImageOperation = null;
     }
     const popoverImage =
-        !resultPopover.hidden &&
+        popoverMatches({ pairKey }) &&
         activePopoverImage?.pairKey === pairKey &&
         activePopoverImage.url === entry.url
             ? activePopoverImage
@@ -157,7 +200,8 @@ function handleImageFailure(
 ) {
     if (
         renderToken !== null &&
-        (activePopoverImage?.token !== renderToken ||
+        (!popoverMatches({ token: renderToken, pairKey }) ||
+            activePopoverImage?.token !== renderToken ||
             activePopoverImage.image !== renderedImage)
     )
         return false;
@@ -182,13 +226,27 @@ function handleImageFailure(
             activeImageOperation = null;
     }
     const popoverImage =
-        !resultPopover.hidden &&
+        popoverMatches({ pairKey }) &&
         activePopoverImage?.pairKey === pairKey &&
         activePopoverImage.url === url
             ? activePopoverImage
             : null;
     imageCache.delete(pairKey);
-    if (!popoverImage) return true;
+    const item = itemByPair(pairKey);
+    imageFailures.set(`image:${pairKey}`, {
+        id: `image:${pairKey}`,
+        pairKey,
+        stage: "image",
+        discovery: popoverImage?.discovery ?? discoveryData(item),
+        operation: activeOperation,
+        x: resultAnchor?.x ?? 20,
+        y: resultAnchor?.y ?? 62,
+        label: `${(popoverImage?.discovery ?? discoveryData(item))?.name ?? "Illustration"} illustration unavailable — retry`,
+    });
+    if (!popoverImage) {
+        refreshImageVisuals(pairKey);
+        return true;
+    }
     activePopoverImage = null;
     resultPopover.setAttribute("aria-busy", "false");
     if (!resultAnchor) {
@@ -203,6 +261,8 @@ function handleImageFailure(
         null,
         true,
         false,
+        activeOperation,
+        resultBinding,
     );
     announce(
         `${popoverImage.discovery.name} illustration could not be displayed.`,
@@ -217,6 +277,7 @@ function completeImageOperation(pairKey, url) {
     clearImageTimer(operation);
     operation.imagePending = false;
     operation.imageDisplayed = true;
+    imageFailures.delete(`image:${pairKey}`);
     imageOperations.delete(pairKey);
     if (activeImageOperation === operation) activeImageOperation = null;
     updateRetryButtons();
@@ -231,14 +292,22 @@ function positionResult(x, y) {
     const gutter = 12;
     const canvasRect = canvas.getBoundingClientRect();
     const resultRect = resultPopover.getBoundingClientRect();
-    const rightEdge = Math.min(window.innerWidth - gutter, canvasRect.right);
-    const bottomEdge = Math.min(window.innerHeight - gutter, canvasRect.bottom);
+    const rightEdge = Math.min(
+        globalThis.innerWidth - gutter,
+        canvasRect.right,
+    );
+    const bottomEdge = Math.min(
+        globalThis.innerHeight - gutter,
+        canvasRect.bottom,
+    );
     const minLeft = Math.max(gutter, canvasRect.left + gutter);
-    const minTop = canvasRect.top + gutter;
+    const minTop = Math.max(gutter, canvasRect.top + gutter);
     const maxLeft = Math.max(minLeft, rightEdge - resultRect.width - gutter);
     const maxTop = Math.max(minTop, bottomEdge - resultRect.height - gutter);
-    resultPopover.style.left = `${Math.max(minLeft, Math.min(canvasRect.left + x + 90, maxLeft))}px`;
-    resultPopover.style.top = `${Math.max(minTop, Math.min(canvasRect.top + y + 90, maxTop))}px`;
+    const desiredLeft = canvasRect.left + x + 90;
+    const desiredTop = canvasRect.top + y + 90;
+    resultPopover.style.left = `${Math.max(minLeft, Math.min(desiredLeft, maxLeft))}px`;
+    resultPopover.style.top = `${Math.max(minTop, Math.min(desiredTop, maxTop))}px`;
 }
 function cancelAllImageOperations() {
     for (const operation of imageOperations.values()) {
@@ -323,6 +392,9 @@ function renderAuthState() {
 function itemById(id) {
     return inventoryItems(state).find((item) => item.id === id) ?? null;
 }
+function itemByPair(pairKey) {
+    return inventoryItems(state).find((item) => item.pair === pairKey) ?? null;
+}
 
 function discoveryData(item) {
     return item ? { name: item.name, description: item.description } : null;
@@ -361,7 +433,7 @@ function imageElement(url, pairKey) {
     return image;
 }
 function updateImageVisual(slot, item) {
-    const cached = item.discovered ? imageCache.peek(item.pair) : null;
+    const cached = item.discovered ? imageCache.get(item.pair) : null;
     slot.classList.toggle("is-placeholder", !cached && item.discovered);
     slot.replaceChildren();
     if (cached) slot.append(imageElement(cached.url, item.pair));
@@ -439,6 +511,42 @@ function updateRetryButtons() {
         !activeDiscovery ||
         !activeImagePair;
 }
+function retryFailedResult(id) {
+    const failure = failedResults.get(id) ?? imageFailures.get(id);
+    if (!failure || (failure.stage === "image" && !failure.discovery)) return;
+    if (failure.stage === "image") {
+        const key = getKey();
+        if (!key) {
+            promptForKey();
+            return;
+        }
+        imageFailures.delete(id);
+        const operation = {
+            id: ++nextOperationId,
+            resetVersion,
+            imagePairKey: failure.pairKey,
+            discovery: failure.discovery,
+            imageDiscovery: failure.discovery,
+            x: failure.x,
+            y: failure.y,
+            cancelled: false,
+        };
+        imageCache.delete(operation.imagePairKey);
+        loadImage(operation, key);
+        announce(`${failure.discovery.name} illustration retry started.`);
+        return;
+    }
+    failedResults.delete(id);
+    startCombination({
+        firstItem: failure.firstItem,
+        secondItem: failure.secondItem,
+        sourceIds: failure.sourceIds,
+        x: failure.x,
+        y: failure.y,
+        returnFocus: failure.returnFocus,
+        returnFocusInstanceId: failure.returnFocusInstanceId,
+    });
+}
 function setTextBusy(next) {
     canvas.setAttribute("aria-busy", String(next));
     live.setAttribute("aria-busy", String(next));
@@ -491,8 +599,9 @@ function renderPendingResult(pending) {
     chip.className = "canvas-chip pending-result";
     chip.dataset.tone = "lime";
     chip.dataset.pending = String(pending.operationId);
-    chip.style.left = `${pending.x}px`;
-    chip.style.top = `${pending.y}px`;
+    const point = positionWithinCanvas(pending.x, pending.y, 160, 44);
+    chip.style.left = `${point.x}px`;
+    chip.style.top = `${point.y}px`;
     chip.setAttribute("aria-busy", "true");
     chip.setAttribute("aria-label", "Combining ingredients, result loading");
     chip.disabled = true;
@@ -504,7 +613,32 @@ function renderPendingResult(pending) {
     chip.append(visual, label);
     canvasItems.append(chip);
 }
+function renderFailureResult(failure) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "canvas-chip failure-result";
+    chip.dataset.tone = "lavender";
+    chip.dataset.failure = String(failure.id);
+    const point = positionWithinCanvas(failure.x, failure.y, 190, 44);
+    chip.style.left = `${point.x}px`;
+    chip.style.top = `${point.y}px`;
+    chip.setAttribute("aria-label", `Retry ${failure.label}`);
+    const visual = document.createElement("span");
+    visual.className = "element-visual is-placeholder";
+    visual.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = failure.label;
+    chip.append(visual, label);
+    chip.addEventListener("click", () => retryFailedResult(failure.id));
+    canvasItems.append(chip);
+}
 function createInstance(item, x, y, isNew = false) {
+    if (instances.size >= MAX_CANVAS_INSTANCES) {
+        announce(
+            `The canvas is full (${MAX_CANVAS_INSTANCES} items). Clear a safe item before placing another.`,
+        );
+        return null;
+    }
     const point = positionWithinCanvas(x, y);
     const instance = {
         id: `instance-${nextInstanceId++}`,
@@ -537,8 +671,12 @@ function renderCanvas(newId = null) {
         );
         chip.dataset.instance = instance.id;
         chip.dataset.pairKey = item.discovered ? item.pair : "";
-        chip.classList.toggle("is-combining", instanceIsClaimed(instance.id));
-        chip.setAttribute("aria-busy", String(instanceIsClaimed(instance.id)));
+        const claimed = instanceIsClaimed(instance.id);
+        chip.classList.toggle("is-combining", claimed);
+        chip.setAttribute("aria-busy", String(claimed));
+        chip.setAttribute("aria-disabled", String(claimed));
+        if (claimed)
+            chip.setAttribute("aria-label", `${item.name} (combining)`);
         chip.disabled = false;
         const label = document.createElement("span");
         label.textContent = item.name;
@@ -568,6 +706,9 @@ function renderCanvas(newId = null) {
         chip.style.top = `${point.y}px`;
     }
     for (const pending of pendingResults.values()) renderPendingResult(pending);
+    for (const failure of failedResults.values()) renderFailureResult(failure);
+    for (const failure of imageFailures.values())
+        if (!failedResults.has(failure.id)) renderFailureResult(failure);
     const focusId = newId ?? focusedInstanceId;
     if (focusId)
         canvasItems.querySelector(`[data-instance="${focusId}"]`)?.focus();
@@ -629,6 +770,8 @@ function renderInventory() {
 }
 function placeFromInventory(item, x = null, y = null) {
     retryTextAvailable = false;
+    activeCombination = null;
+    clearPopoverBinding();
     resultPopover.setAttribute("aria-busy", "false");
     resultPopover.hidden = true;
     resultAnchor = null;
@@ -659,6 +802,7 @@ function placeFromInventory(item, x = null, y = null) {
             false,
             true,
             activeImageOperation,
+            { kind: "discovery", pairKey: activeImagePair },
         );
 }
 
@@ -982,10 +1126,12 @@ function activateInstance(id) {
     if (instanceIsClaimed(id)) return;
     resultPopover.hidden = true;
     resultPopover.setAttribute("aria-busy", "false");
+    clearPopoverBinding();
     resultAnchor = null;
     activeImagePair = null;
     activeDiscovery = null;
     activeImageOperation = null;
+    activeCombination = null;
     selected = selected.includes(id)
         ? selected.filter((value) => value !== id)
         : selected.length === 1
@@ -1133,6 +1279,16 @@ function startCombination({
                     ? (imageOperations.get(operation.imagePairKey) ?? null)
                     : null;
             }
+            const removableSources = operation.sourceIds.filter((id) =>
+                instances.has(id),
+            ).length;
+            if (instances.size - removableSources >= MAX_CANVAS_INSTANCES)
+                throw new ApiError(
+                    `The canvas is full (${MAX_CANVAS_INSTANCES} items). Clear a safe item before placing the result.`,
+                    "canvas_full",
+                    0,
+                    true,
+                );
             for (const sourceId of operation.sourceIds)
                 instances.delete(sourceId);
             releaseCombination(operation);
@@ -1142,6 +1298,13 @@ function startCombination({
                 operation.y,
                 true,
             );
+            if (!resultInstance)
+                throw new ApiError(
+                    "The result could not be placed on the canvas.",
+                    "canvas_full",
+                    0,
+                    true,
+                );
             renderCanvas(resultInstance.id);
             const cachedImage = operation.imagePairKey
                 ? imageCache.get(operation.imagePairKey)
@@ -1156,6 +1319,7 @@ function startCombination({
                     false,
                     false,
                     activeImageOperation,
+                    operation,
                 );
             if (activeCombination === operation)
                 announce(
@@ -1170,29 +1334,55 @@ function startCombination({
             if (operationIsCurrent(operation)) {
                 const sourceIds = [...operation.sourceIds];
                 releaseCombination(operation, true);
+                failedResults.set(operation.id, {
+                    id: operation.id,
+                    stage,
+                    label:
+                        stage === "idea"
+                            ? "Idea unavailable — retry"
+                            : `${operation.discovery?.name ?? "Result"} unavailable — retry`,
+                    firstItem: operation.firstItem,
+                    secondItem: operation.secondItem,
+                    sourceIds,
+                    x: operation.x,
+                    y: operation.y,
+                    returnFocus: operation.returnFocus,
+                    returnFocusInstanceId: operation.returnFocusInstanceId,
+                });
                 if (stage === "idea") {
                     resultReturnFocus = operation.returnFocus;
                     resultReturnInstanceId =
                         operation.returnFocusInstanceId ?? sourceIds[0] ?? null;
                 }
                 if (activeCombination === operation)
-                    openError(error, stage, operation.x, operation.y);
+                    openError(
+                        error,
+                        stage,
+                        operation.x,
+                        operation.y,
+                        operation.discovery ?? activeDiscovery,
+                        operation,
+                    );
                 else
                     announce(
-                        `${firstItem.name} + ${secondItem.name} could not be combined.`,
+                        `${firstItem.name} + ${secondItem.name} could not be combined. Retry is available on the canvas.`,
                     );
+                renderCanvas();
             }
         }
     })();
 }
 function updateOpenPopoverImage(operation, imageUrl, imageOperation = null) {
     if (
-        resultPopover.hidden ||
-        activeImagePair !== operation.imagePairKey ||
+        !popoverMatches({ pairKey: operation.imagePairKey }) ||
         !activeDiscovery ||
         !resultAnchor
     )
         return;
+    const boundToOperation =
+        resultBinding.operationId === operation.id ||
+        resultBinding.kind === "discovery";
+    if (!boundToOperation) return;
     openResult(
         activeDiscovery,
         resultAnchor.x,
@@ -1202,6 +1392,7 @@ function updateOpenPopoverImage(operation, imageUrl, imageOperation = null) {
         false,
         false,
         imageOperation,
+        resultBinding,
     );
 }
 async function loadImage(operation, key) {
@@ -1225,6 +1416,7 @@ async function loadImage(operation, key) {
     }
     const cached = imageCache.get(operation.imagePairKey);
     if (cached) {
+        imageFailures.delete(`image:${operation.imagePairKey}`);
         operation.imageUrl = cached.url;
         operation.imageDisplayed = true;
         operation.imagePending = false;
@@ -1250,6 +1442,7 @@ async function loadImage(operation, key) {
         )
             return;
         const imageUrl = imageCache.set(operation.imagePairKey, blob);
+        imageFailures.delete(`image:${operation.imagePairKey}`);
         operation.imageUrl = imageUrl;
         refreshImageVisuals(operation.imagePairKey);
         updateOpenPopoverImage(operation, imageUrl, operation);
@@ -1258,11 +1451,23 @@ async function loadImage(operation, key) {
             IMAGE_DECODE_TIMEOUT_MS,
         );
     } catch (error) {
-        if (!operation.cancelled) {
+        if (
+            !operation.cancelled &&
+            imageOperations.get(operation.imagePairKey) === operation
+        ) {
             operation.imageError = true;
+            imageFailures.set(`image:${operation.imagePairKey}`, {
+                id: `image:${operation.imagePairKey}`,
+                pairKey: operation.imagePairKey,
+                stage: "image",
+                discovery: operation.imageDiscovery,
+                operation,
+                x: operation.x ?? 20,
+                y: operation.y ?? 62,
+                label: `${operation.imageDiscovery.name} illustration unavailable — retry`,
+            });
             if (
-                !resultPopover.hidden &&
-                activeImagePair === operation.imagePairKey &&
+                popoverMatches({ pairKey: operation.imagePairKey }) &&
                 resultAnchor
             )
                 openError(
@@ -1271,11 +1476,14 @@ async function loadImage(operation, key) {
                     resultAnchor.x,
                     resultAnchor.y,
                     activeDiscovery ?? operation.imageDiscovery,
+                    operation,
                 );
             else
                 announce(
-                    `${operation.imageDiscovery.name} illustration unavailable. Open it to retry the image.`,
+                    `${operation.imageDiscovery.name} illustration unavailable. Retry is available on the canvas.`,
                 );
+            refreshImageVisuals(operation.imagePairKey);
+            renderCanvas();
         }
     } finally {
         if (operation.cancelled || !operation.imageUrl) {
@@ -1300,11 +1508,16 @@ function openResult(
     failed = false,
     focusPanel = true,
     imageOperation = null,
+    binding = null,
 ) {
     if (!discovery) return;
     const imagePairKey = imageOperation?.imagePairKey ?? activeImagePair;
-    const cachedUrl = imagePairKey ? imageCache.peek(imagePairKey)?.url : null;
+    const cachedUrl = imagePairKey ? imageCache.get(imagePairKey)?.url : null;
     const displayedImageUrl = imageUrl ?? cachedUrl;
+    if (imagePairKey) {
+        activeImagePair = imagePairKey;
+        activeDiscovery = discovery;
+    }
     if (resultPopover.hidden) {
         resultReturnFocus = document.activeElement?.isConnected
             ? document.activeElement
@@ -1312,6 +1525,26 @@ function openResult(
         resultReturnInstanceId =
             document.activeElement?.dataset?.instance ?? null;
     }
+    const owner =
+        (binding?.kind
+            ? binding
+            : binding
+              ? {
+                    kind: "operation",
+                    operationId: binding.id,
+                    pairKey: binding.pairKey ?? binding.imagePairKey ?? null,
+                }
+              : null) ??
+        (imageOperation
+            ? { kind: "operation", operationId: imageOperation.id }
+            : activeCombination
+              ? { kind: "operation", operationId: activeCombination.id }
+              : { kind: "discovery" });
+    const activeBinding = bindPopover({
+        kind: owner.kind,
+        operationId: owner.operationId ?? null,
+        pairKey: imagePairKey ?? owner.pairKey ?? null,
+    });
     resultPopover.hidden = false;
     resultPopover.setAttribute(
         "aria-busy",
@@ -1322,7 +1555,7 @@ function openResult(
     resultContent.replaceChildren();
     activePopoverImage = null;
     if (displayedImageUrl) {
-        const renderToken = ++nextPopoverRenderToken;
+        const renderToken = activeBinding.token;
         activePopoverImage = {
             pairKey: imagePairKey,
             url: displayedImageUrl,
@@ -1345,7 +1578,10 @@ function openResult(
             () => {
                 if (
                     !imagePairKey ||
-                    activeImagePair !== imagePairKey ||
+                    !popoverMatches({
+                        token: renderToken,
+                        pairKey: imagePairKey,
+                    }) ||
                     imageCache.peek(imagePairKey)?.url !== displayedImageUrl ||
                     activePopoverImage?.token !== renderToken ||
                     activePopoverImage.image !== image
@@ -1365,6 +1601,7 @@ function openResult(
                 }
                 image.setAttribute("aria-busy", "false");
                 resultPopover.setAttribute("aria-busy", "false");
+                imageFailures.delete(`image:${imagePairKey}`);
                 updateRetryButtons();
                 announce(`${discovery.name} illustration ready.`);
             },
@@ -1408,10 +1645,22 @@ function openResult(
     positionResult(x, y);
     if (focusPanel) document.querySelector("#result-close")?.focus();
 }
-function openError(error, stage, x, y, discovery = activeDiscovery) {
+function openError(
+    error,
+    stage,
+    x,
+    y,
+    discovery = activeDiscovery,
+    operation = null,
+) {
     const messageText = formatApiError(error);
     if (!discovery) {
         resultPopover.hidden = false;
+        bindPopover({
+            kind: operation ? "operation" : "discovery",
+            operationId: operation?.id ?? null,
+            pairKey: operation?.pairKey ?? null,
+        });
         resultPopover.setAttribute("aria-busy", "false");
         resultAnchor = { x, y };
         resultLabel.textContent = "Try again";
@@ -1433,7 +1682,17 @@ function openError(error, stage, x, y, discovery = activeDiscovery) {
         document.querySelector("#result-close")?.focus();
         return;
     }
-    openResult(discovery, x, y, "Try again", null, stage === "image", false);
+    openResult(
+        discovery,
+        x,
+        y,
+        "Try again",
+        null,
+        stage === "image",
+        false,
+        null,
+        operation,
+    );
     const message = document.createElement("p");
     message.className = "result-message";
     message.textContent = messageText;
@@ -1447,7 +1706,7 @@ function openError(error, stage, x, y, discovery = activeDiscovery) {
 function closeResult() {
     setTextBusy(combinationOperations.size > 0);
     resultPopover.hidden = true;
-    activePopoverImage = null;
+    clearPopoverBinding();
     resultAnchor = null;
     activeImagePair = null;
     activeDiscovery = null;
@@ -1472,7 +1731,7 @@ function cancelCombination() {
     selected = [];
     activeImagePair = null;
     activeDiscovery = null;
-    activePopoverImage = null;
+    clearPopoverBinding();
     activeCombination = null;
     activeImageOperation = null;
     retryTextAvailable = false;
@@ -1516,10 +1775,12 @@ function invalidateAuthOperations() {
     cancelActiveDrags();
     cancelAllCombinationOperations();
     cancelAllImageOperations();
+    failedResults.clear();
+    imageFailures.clear();
     selected = [];
     activeImagePair = null;
     activeDiscovery = null;
-    activePopoverImage = null;
+    clearPopoverBinding();
     activeCombination = null;
     activeImageOperation = null;
     retryTextAvailable = false;
@@ -1629,6 +1890,8 @@ resetButton.addEventListener("click", () => {
     cancelActiveDrags();
     cancelAllCombinationOperations();
     cancelAllImageOperations();
+    failedResults.clear();
+    imageFailures.clear();
     state = createInitialState();
     for (const key of [STORAGE_KEY, LEGACY_STORAGE_KEY]) {
         try {
