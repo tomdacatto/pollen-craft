@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
     API_BASE,
+    ApiError,
     combinationPrompt,
     createApiClient,
     DEFAULT_TEXT_MODEL,
@@ -20,6 +21,7 @@ import {
     loadState,
     MAX_DESCRIPTION_LENGTH,
     MAX_DISCOVERIES,
+    MAX_NAME_LENGTH,
     normalizeState,
     parseDiscoveryPayload,
     rectanglesOverlap,
@@ -66,6 +68,16 @@ test("combination prompts prioritize grounded Dust plus Dust and keep records bo
     assert.ok(prompt.length <= 1400);
     assert.match(prompt, /canonical recipe exact/u);
     assert.match(prompt, /Dust\+Dust=>Sand/u);
+    assert.match(prompt, /Fire\+Fire=>Campfire/u);
+    assert.match(prompt, /Moon\+Ocean=>Tide/u);
+    assert.match(prompt, /Book\+Worm=>Bookworm/u);
+    assert.match(prompt, /Cat\+Keyboard=>Meme/u);
+    assert.match(prompt, /Ring\+Wizard=>Lord of the Rings/u);
+    assert.match(prompt, /any two ingredients, including identical inputs/u);
+    assert.doesNotMatch(
+        prompt,
+        /joined list|repeated input|concatenation|vehicle/u,
+    );
     assert.match(prompt, /Records: \[first\]/u);
 });
 
@@ -195,7 +207,7 @@ test("image cache can inject object URL creation for blob entries", () => {
     });
 });
 
-test("discovery parser requires bounded plain strings", () => {
+test("discovery parser keeps only bounded safe strings", () => {
     assert.deepEqual(
         parseDiscoveryPayload({
             name: "Steam",
@@ -207,8 +219,14 @@ test("discovery parser requires bounded plain strings", () => {
     assert.throws(() =>
         parseDiscoveryPayload({ name: "\u200b\uFE0F", description: "no" }),
     );
-    assert.throws(() =>
-        parseDiscoveryPayload({ name: "A", description: "ok", extra: "nope" }),
+    assert.deepEqual(
+        parseDiscoveryPayload({
+            name: "A",
+            description: "ok",
+            extra: "ignored",
+            reasoning: { hidden: true },
+        }),
+        { name: "A", description: "ok" },
     );
     assert.throws(() =>
         parseDiscoveryPayload({
@@ -222,6 +240,31 @@ test("discovery parser requires bounded plain strings", () => {
             description: "still text",
         }),
     );
+    for (const [payload, code] of [
+        [null, "OUTPUT_NOT_OBJECT"],
+        [{ description: "ok" }, "OUTPUT_MISSING_NAME"],
+        [{ name: "A" }, "OUTPUT_MISSING_DESCRIPTION"],
+        [{ name: 1, description: "ok" }, "OUTPUT_FIELD_TYPE"],
+        [{ name: "A", description: 1 }, "OUTPUT_FIELD_TYPE"],
+        [{ name: " ", description: "ok" }, "OUTPUT_NAME_EMPTY"],
+        [{ name: "A", description: " " }, "OUTPUT_DESCRIPTION_EMPTY"],
+        [
+            { name: "A".repeat(MAX_NAME_LENGTH + 1), description: "ok" },
+            "OUTPUT_NAME_TOO_LONG",
+        ],
+        [
+            { name: "A", description: "x".repeat(MAX_DESCRIPTION_LENGTH + 1) },
+            "OUTPUT_DESCRIPTION_TOO_LONG",
+        ],
+        [{ name: "\u200b", description: "ok" }, "OUTPUT_UNSAFE_TEXT"],
+        [{ name: "<A>", description: "ok" }, "OUTPUT_UNSAFE_TEXT"],
+        [{ name: "A", description: "bad\u0001" }, "OUTPUT_UNSAFE_TEXT"],
+    ]) {
+        assert.throws(
+            () => parseDiscoveryPayload(payload),
+            (error) => error.code === code,
+        );
+    }
 });
 
 test("state load recovers corruption and bounds discoveries", () => {
@@ -683,7 +726,6 @@ test("ambiguous and invalid model content retries at most once", async () => {
         ],
         JSON.stringify(JSON.stringify(JSON.stringify(valid))),
         JSON.stringify({ name: "Alloy" }),
-        JSON.stringify({ ...valid, extra: "not allowed" }),
         JSON.stringify({
             name: "<b>Alloy</b>",
             description: valid.description,
@@ -692,7 +734,6 @@ test("ambiguous and invalid model content retries at most once", async () => {
             name: "\u200b\uFE0F",
             description: valid.description,
         }),
-        JSON.stringify({ name: "Copper", description: "One input repeated." }),
     ];
     for (const content of contents) {
         let calls = 0;
@@ -723,6 +764,101 @@ test("ambiguous and invalid model content retries at most once", async () => {
     }
 });
 
+test("output diagnostics preserve precise safe codes through the retry", async () => {
+    const pair = {
+        first: { id: "copper", name: "Copper", description: "metal" },
+        second: { id: "zinc", name: "Zinc", description: "metal" },
+    };
+    const cases = [
+        ["not json", "OUTPUT_JSON_MALFORMED"],
+        [
+            JSON.stringify({ description: "missing name" }),
+            "OUTPUT_MISSING_NAME",
+        ],
+        [JSON.stringify({ name: "Alloy" }), "OUTPUT_MISSING_DESCRIPTION"],
+        [
+            JSON.stringify({ name: "Alloy", description: 42 }),
+            "OUTPUT_FIELD_TYPE",
+        ],
+        [
+            JSON.stringify({ name: "\u200b", description: "hidden" }),
+            "OUTPUT_UNSAFE_TEXT",
+        ],
+    ];
+    for (const [content, code] of cases) {
+        const client = createApiClient(
+            async () =>
+                new Response(
+                    JSON.stringify({
+                        choices: [
+                            {
+                                finish_reason: "stop",
+                                message: { content },
+                            },
+                        ],
+                    }),
+                    {
+                        status: 200,
+                        headers: { "content-type": "application/json" },
+                    },
+                ),
+            { timeoutMs: 1000 },
+        );
+        await assert.rejects(
+            () => client.discoverText(pair, "sk_test_12345678"),
+            (error) => {
+                assert.ok(error instanceof ApiError);
+                assert.equal(error.code, code);
+                assert.equal(error.attempt, 2);
+                assert.equal(error.maxAttempts, 2);
+                assert.equal(error.model, "NVIDIA Nemotron 3.5 Lightning");
+                assert.doesNotMatch(error.message, /sk_test|not json|42/u);
+                return true;
+            },
+        );
+    }
+});
+
+test("extra model fields are accepted but never returned", async () => {
+    const client = createApiClient(
+        async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [
+                        {
+                            finish_reason: "stop",
+                            message: {
+                                content: JSON.stringify({
+                                    name: "Alloy",
+                                    description: "A useful metal mixture.",
+                                    reasoning: "hidden",
+                                    emoji: "⚙️",
+                                    metadata: { unsafe: "ignored" },
+                                }),
+                            },
+                        },
+                    ],
+                }),
+                {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                },
+            ),
+        { timeoutMs: 1000 },
+    );
+    const result = await client.discoverText(
+        {
+            first: { id: "copper", name: "Copper", description: "metal" },
+            second: { id: "zinc", name: "Zinc", description: "metal" },
+        },
+        "sk_test_12345678",
+    );
+    assert.deepEqual(result, {
+        name: "Alloy",
+        description: "A useful metal mixture.",
+    });
+});
+
 test("truncated text responses are retryable instead of malformed JSON", async () => {
     let calls = 0;
     const client = createApiClient(
@@ -748,12 +884,21 @@ test("truncated text responses are retryable instead of malformed JSON", async (
     };
     await assert.rejects(
         () => client.discoverText(pair, "sk_test_12345678"),
-        /The idea response was cut off\. Retry the idea\./u,
+        (error) => {
+            assert.match(
+                error.message,
+                /The idea response was cut off\. Retry the idea\./u,
+            );
+            assert.equal(error.code, "RESPONSE_TRUNCATED");
+            assert.equal(error.attempt, 2);
+            assert.equal(error.maxAttempts, 2);
+            return true;
+        },
     );
     assert.equal(calls, 2);
 });
 
-test("pair validation rejects repeated ingredient names without blocking compounds", async () => {
+test("unknown pairs accept recognizable compounds and repeated ingredient names", async () => {
     const pair = {
         first: { id: "copper", name: "Copper", description: "metal" },
         second: { id: "zinc", name: "Zinc", description: "metal" },
@@ -781,9 +926,9 @@ test("pair validation rejects repeated ingredient names without blocking compoun
             ),
         { timeoutMs: 1000 },
     );
-    await assert.rejects(
-        () => repeated.discoverText(pair, "sk_test_12345678"),
-        /The idea joined the ingredients\. Retry the idea\./u,
+    assert.equal(
+        (await repeated.discoverText(pair, "sk_test_12345678")).name,
+        "Copper and Zinc Lantern",
     );
     const compound = createApiClient(
         async () =>
@@ -890,15 +1035,15 @@ test("same-item results may contain their ingredient name", async () => {
     assert.equal(result.name, "Fire");
 });
 
-test("unknown identical inputs reject Water and accept the same ingredient", async () => {
+test("unknown identical inputs accept any structurally safe result", async () => {
     const pair = {
         first: { id: "quartz", name: "Quartz", description: "mineral" },
         second: { id: "quartz", name: "Quartz", description: "mineral" },
     };
-    let rejectedCalls = 0;
-    const rejected = createApiClient(
+    let differentCalls = 0;
+    const different = createApiClient(
         async () => {
-            rejectedCalls += 1;
+            differentCalls += 1;
             return new Response(
                 JSON.stringify({
                     choices: [
@@ -921,11 +1066,11 @@ test("unknown identical inputs reject Water and accept the same ingredient", asy
         },
         { timeoutMs: 1000 },
     );
-    await assert.rejects(
-        () => rejected.discoverText(pair, "sk_test_12345678"),
-        /identical-input result must equal the ingredient/u,
+    assert.equal(
+        (await different.discoverText(pair, "sk_test_12345678")).name,
+        "Water",
     );
-    assert.equal(rejectedCalls, 2);
+    assert.equal(differentCalls, 1);
 
     let acceptedCalls = 0;
     const accepted = createApiClient(
@@ -961,7 +1106,7 @@ test("unknown identical inputs reject Water and accept the same ingredient", asy
     assert.equal(acceptedCalls, 1);
 });
 
-test("distinct results cannot be a single ingredient or a joined list", async () => {
+test("distinct results may repeat or join either ingredient", async () => {
     let calls = 0;
     const client = createApiClient(
         async () => {
@@ -988,9 +1133,9 @@ test("distinct results cannot be a single ingredient or a joined list", async ()
         },
         { timeoutMs: 1000 },
     );
-    await assert.rejects(
-        () =>
-            client.discoverText(
+    assert.equal(
+        (
+            await client.discoverText(
                 {
                     first: {
                         id: "copper",
@@ -1000,10 +1145,11 @@ test("distinct results cannot be a single ingredient or a joined list", async ()
                     second: { id: "zinc", name: "Zinc", description: "metal" },
                 },
                 "sk_test_12345678",
-            ),
-        /repeated one ingredient/u,
+            )
+        ).name,
+        "Copper",
     );
-    assert.equal(calls, 2);
+    assert.equal(calls, 1);
 });
 
 test("Dust plus Dust is anchored to Sand and rejects Water", async () => {
@@ -1079,7 +1225,11 @@ test("Dust plus Dust is anchored to Sand and rejects Water", async () => {
 });
 
 test("only recipe-output failures retry, never auth or HTTP failures", async () => {
-    for (const status of [401, 500]) {
+    for (const [status, code] of [
+        [401, "AUTH_INVALID"],
+        [429, "RATE_LIMITED"],
+        [500, "HTTP_ERROR"],
+    ]) {
         let calls = 0;
         const client = createApiClient(
             async () => {
@@ -1088,18 +1238,29 @@ test("only recipe-output failures retry, never auth or HTTP failures", async () 
             },
             { timeoutMs: 1000 },
         );
-        await assert.rejects(() =>
-            client.discoverText(
-                {
-                    first: { id: "ore", name: "Ore", description: "rock" },
-                    second: {
-                        id: "salt",
-                        name: "Salt",
-                        description: "mineral",
+        await assert.rejects(
+            () =>
+                client.discoverText(
+                    {
+                        first: {
+                            id: "ore",
+                            name: "Ore",
+                            description: "rock",
+                        },
+                        second: {
+                            id: "salt",
+                            name: "Salt",
+                            description: "mineral",
+                        },
                     },
-                },
-                "sk_test_12345678",
-            ),
+                    "sk_test_12345678",
+                ),
+            (error) => {
+                assert.equal(error.code, code);
+                assert.equal(error.attempt, 1);
+                assert.equal(error.maxAttempts, 1);
+                return true;
+            },
         );
         assert.equal(calls, 1);
     }
@@ -1114,14 +1275,29 @@ test("only recipe-output failures retry, never auth or HTTP failures", async () 
         },
         { timeoutMs: 1000 },
     );
-    await assert.rejects(() =>
-        unreadable.discoverText(
-            {
-                first: { id: "ore", name: "Ore", description: "rock" },
-                second: { id: "salt", name: "Salt", description: "mineral" },
-            },
-            "sk_test_12345678",
-        ),
+    await assert.rejects(
+        () =>
+            unreadable.discoverText(
+                {
+                    first: {
+                        id: "ore",
+                        name: "Ore",
+                        description: "rock",
+                    },
+                    second: {
+                        id: "salt",
+                        name: "Salt",
+                        description: "mineral",
+                    },
+                },
+                "sk_test_12345678",
+            ),
+        (error) => {
+            assert.equal(error.code, "RESPONSE_BODY_MALFORMED");
+            assert.equal(error.attempt, 1);
+            assert.equal(error.maxAttempts, 1);
+            return true;
+        },
     );
     assert.equal(bodyCalls, 1);
 });
@@ -1133,7 +1309,7 @@ test("text dedupe spans the complete corrective retry", async () => {
             calls += 1;
             const discovery =
                 calls === 1
-                    ? { name: "Ore and Salt", description: "joined" }
+                    ? "not JSON"
                     : { name: "Alloy", description: "A useful metal mixture." };
             return new Response(
                 JSON.stringify({
@@ -1273,7 +1449,17 @@ test("grounded anchor mismatch is rejected without silent correction", async () 
                 },
                 "sk_test_12345678",
             ),
-        /The grounded result must be Storm\. Retry the idea\./u,
+        (error) => {
+            assert.match(
+                error.message,
+                /The grounded result must be Storm\. Retry the idea\./u,
+            );
+            assert.equal(error.code, "OUTPUT_ANCHOR_MISMATCH");
+            assert.equal(error.attempt, 2);
+            assert.equal(error.maxAttempts, 2);
+            assert.equal(error.model, "NVIDIA Nemotron 3.5 Lightning");
+            return true;
+        },
     );
 });
 
@@ -1368,6 +1554,12 @@ test("body reads stay bounded and respect timeout", async () => {
     };
     await assert.rejects(
         () => never.discoverText(pair, "sk_test_12345678"),
-        /too long/u,
+        (error) => {
+            assert.match(error.message, /too long/u);
+            assert.equal(error.code, "REQUEST_TIMEOUT");
+            assert.equal(error.attempt, 1);
+            assert.equal(error.maxAttempts, 1);
+            return true;
+        },
     );
 });

@@ -4,6 +4,43 @@ export const MAX_DISCOVERIES = 120;
 export const MAX_NAME_LENGTH = 64;
 export const MAX_DESCRIPTION_LENGTH = 280;
 
+export const OUTPUT_ERROR_MESSAGES = Object.freeze({
+    OUTPUT_JSON_MALFORMED: "The lab returned malformed JSON. Retry the idea.",
+    OUTPUT_CONTENT_UNSUPPORTED:
+        "The lab returned unsupported content. Retry the idea.",
+    OUTPUT_NOT_OBJECT: "The lab returned a non-object result. Retry the idea.",
+    OUTPUT_MISSING_NAME: "The lab result is missing a name. Retry the idea.",
+    OUTPUT_MISSING_DESCRIPTION:
+        "The lab result is missing a description. Retry the idea.",
+    OUTPUT_FIELD_TYPE:
+        "The lab result name and description must be strings. Retry the idea.",
+    OUTPUT_NAME_EMPTY: "The lab result has an empty name. Retry the idea.",
+    OUTPUT_DESCRIPTION_EMPTY:
+        "The lab result has an empty description. Retry the idea.",
+    OUTPUT_NAME_TOO_LONG: "The lab result name is too long. Retry the idea.",
+    OUTPUT_DESCRIPTION_TOO_LONG:
+        "The lab result description is too long. Retry the idea.",
+    OUTPUT_UNSAFE_TEXT: "The lab result contains unsafe text. Retry the idea.",
+    OUTPUT_ANCHOR_MISMATCH:
+        "The grounded result did not match its recipe anchor. Retry the idea.",
+    OUTPUT_VALIDATION: "The lab result failed validation. Retry the idea.",
+    RESPONSE_TRUNCATED: "The idea response was cut off. Retry the idea.",
+    RESPONSE_TOO_LARGE: "The idea response was too large. Retry the idea.",
+});
+
+const OUTPUT_ERROR_CODES = new Set(Object.keys(OUTPUT_ERROR_MESSAGES));
+
+export class DiscoveryOutputError extends Error {
+    constructor(code) {
+        const safeCode = OUTPUT_ERROR_CODES.has(code)
+            ? code
+            : "OUTPUT_VALIDATION";
+        super(OUTPUT_ERROR_MESSAGES[safeCode]);
+        this.name = "DiscoveryOutputError";
+        this.code = safeCode;
+    }
+}
+
 export const SEEDS = Object.freeze([
     {
         id: "fire",
@@ -84,34 +121,35 @@ export function isCanonicalPairKey(key) {
 
 export function parseDiscoveryPayload(value) {
     if (!value || typeof value !== "object" || Array.isArray(value))
-        throw new Error("The lab returned an invalid discovery.");
-    const keys = Object.keys(value);
-    if (
-        keys.length !== 2 ||
-        !keys.every((key) => key === "name" || key === "description")
-    )
-        throw new Error("The lab returned an invalid discovery.");
-    const name = typeof value.name === "string" ? value.name.trim() : "";
-    const description =
-        typeof value.description === "string" ? value.description.trim() : "";
-    if (
-        !name ||
-        !displayNameKey(name) ||
-        !description ||
-        name.length > MAX_NAME_LENGTH ||
-        description.length > MAX_DESCRIPTION_LENGTH
-    )
-        throw new Error("The lab returned an incomplete discovery.");
+        throw new DiscoveryOutputError("OUTPUT_NOT_OBJECT");
+    if (!Object.hasOwn(value, "name"))
+        throw new DiscoveryOutputError("OUTPUT_MISSING_NAME");
+    if (!Object.hasOwn(value, "description"))
+        throw new DiscoveryOutputError("OUTPUT_MISSING_DESCRIPTION");
+    if (typeof value.name !== "string" || typeof value.description !== "string")
+        throw new DiscoveryOutputError("OUTPUT_FIELD_TYPE");
+    const name = value.name.trim();
+    const description = value.description.trim();
+    if (!name) throw new DiscoveryOutputError("OUTPUT_NAME_EMPTY");
+    if (!description)
+        throw new DiscoveryOutputError("OUTPUT_DESCRIPTION_EMPTY");
+    if (name.length > MAX_NAME_LENGTH)
+        throw new DiscoveryOutputError("OUTPUT_NAME_TOO_LONG");
+    if (description.length > MAX_DESCRIPTION_LENGTH)
+        throw new DiscoveryOutputError("OUTPUT_DESCRIPTION_TOO_LONG");
     const text = `${name}${description}`;
     if (
         text.includes("<") ||
         text.includes(">") ||
+        !displayNameKey(name) ||
+        !displayNameKey(description) ||
+        /[\p{Default_Ignorable_Code_Point}\p{Cf}]/u.test(text) ||
         Array.from(text).some((char) => {
             const code = char.codePointAt(0);
             return code < 32 && ![9, 10, 13].includes(code);
         })
     )
-        throw new Error("The lab returned unusable text.");
+        throw new DiscoveryOutputError("OUTPUT_UNSAFE_TEXT");
     return { name, description };
 }
 

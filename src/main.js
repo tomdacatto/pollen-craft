@@ -261,6 +261,15 @@ function getTextModel() {
 function textModelLabel(model) {
     return TEXT_MODELS.find((entry) => entry.id === model)?.label ?? model;
 }
+function formatApiError(error) {
+    if (!(error instanceof ApiError)) return "Something went wrong. Try again.";
+    const details = [
+        error.code,
+        `attempt ${error.attempt}/${error.maxAttempts}`,
+    ];
+    if (error.model) details.push(`model ${error.model}`);
+    return `${error.message} [${details.join("; ")}]`;
+}
 for (const model of TEXT_MODELS) {
     const option = document.createElement("option");
     option.value = model.id;
@@ -1307,10 +1316,7 @@ function openResult(
     if (focusPanel) document.querySelector("#result-close")?.focus();
 }
 function openError(error, stage, x, y, discovery = activeDiscovery) {
-    const messageText =
-        error instanceof ApiError
-            ? error.message
-            : "Something went wrong. Try again.";
+    const messageText = formatApiError(error);
     if (!discovery) {
         resultPopover.hidden = false;
         resultPopover.setAttribute("aria-busy", "false");
