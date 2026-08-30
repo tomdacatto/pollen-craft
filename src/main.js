@@ -2,7 +2,6 @@ import {
     ApiError,
     createApiClient,
     DEFAULT_TEXT_MODEL,
-    isSecretKey,
     isTextModel,
     TEXT_MODELS,
 } from "./api.js";
@@ -21,9 +20,15 @@ import {
     saveState,
 } from "./game.js";
 import { createImageCache } from "./image-cache.js";
+import {
+    createOAuthClient,
+    initializeOAuthStorage,
+    OAuthError,
+} from "./oauth.js";
 
 const localStore = safeStorage("localStorage");
 const tabStore = safeStorage("sessionStorage");
+initializeOAuthStorage(tabStore);
 const api = createApiClient();
 const canvas = document.querySelector("#crafting-canvas");
 const canvasItems = document.querySelector("#canvas-items");
@@ -35,15 +40,22 @@ const resultLabel = document.querySelector("#result-label");
 const retryText = document.querySelector("#retry-text");
 const retryImage = document.querySelector("#retry-image");
 const live = document.querySelector("#live-region");
-const keyInput = document.querySelector("#api-key");
 const keyStatus = document.querySelector("#key-status");
-const keyForm = document.querySelector("#key-form");
+const connectButton = document.querySelector("#connect-wallet");
+const disconnectButton = document.querySelector("#disconnect-wallet");
 const modelSelect = document.querySelector("#text-model");
 const settingsDialog = document.querySelector("#settings-dialog");
 const helpDialog = document.querySelector("#help-dialog");
 const resetButton = document.querySelector("#reset-game");
 const IMAGE_DECODE_TIMEOUT_MS = 15_000;
 const TEXT_MODEL_STORAGE_KEY = "pollen-craft:text-model:v2";
+const oauth = createOAuthClient({
+    storage: tabStore,
+    getLocation: () => globalThis.location,
+    getHistory: () => globalThis.history,
+    fetchImpl: globalThis.fetch,
+    cryptoImpl: globalThis.crypto,
+});
 let state = loadState(localStore);
 let selected = [];
 let instances = new Map();
@@ -53,6 +65,8 @@ let suppressInventoryClick = false;
 let suppressInventoryChip = null;
 let inventoryClickReset = null;
 let busy = false;
+let authBusy = false;
+let authStatusMessage = "";
 let generation = 0;
 let activeImagePair = null;
 let activeDiscovery = null;
@@ -231,18 +245,12 @@ function cancelAllImageOperations() {
     imageOperations.clear();
     activeImageOperation = null;
 }
-function readTabKey() {
-    try {
-        const key = tabStore?.getItem("pollen-craft:key") || "";
-        if (isSecretKey(key)) return key;
-    } catch {
-        /* storage may be blocked */
-    }
-    return "";
-}
 function getKey() {
-    const input = keyInput.value.trim();
-    return isSecretKey(input) ? input : readTabKey();
+    try {
+        return oauth.getToken()?.token ?? "";
+    } catch {
+        return "";
+    }
 }
 function readTextModel() {
     try {
@@ -279,10 +287,34 @@ for (const model of TEXT_MODELS) {
 modelSelect.value = readTextModel();
 function promptForKey() {
     openSettings();
-    keyInput.focus();
-    announce(
-        "A Pollinations sk_ Secret Key is required to combine ingredients.",
-    );
+    connectButton.focus();
+    announce("Connect your Pollinations wallet to discover new ingredients.");
+}
+function setAuthStatus(error = null) {
+    authStatusMessage =
+        error instanceof OAuthError
+            ? `${error.code}: ${error.message}`
+            : error
+              ? "Wallet connection could not be completed. Try again."
+              : "";
+    renderAuthState();
+}
+function renderAuthState() {
+    const connected = Boolean(getKey());
+    connectButton.hidden = connected;
+    disconnectButton.hidden = !connected;
+    connectButton.disabled = busy || authBusy;
+    disconnectButton.disabled = busy || authBusy;
+    connectButton.textContent = authBusy
+        ? "Connecting…"
+        : "Connect Pollinations wallet";
+    keyStatus.classList.toggle("is-ready", connected && !authStatusMessage);
+    keyStatus.textContent = authBusy
+        ? "Connecting to Pollinations…"
+        : authStatusMessage ||
+          (connected
+              ? "Connected for this browser tab."
+              : "Not connected yet. Connect your wallet to discover ideas.");
 }
 function itemById(id) {
     return inventoryItems(state).find((item) => item.id === id) ?? null;
@@ -409,9 +441,6 @@ function setTextBusy(next) {
 }
 function setBusy(next) {
     busy = next;
-    keyInput.disabled = next;
-    document.querySelector("#settings-save").disabled = next;
-    document.querySelector("#forget-key").disabled = next;
     modelSelect.disabled = next;
     search.disabled = next;
     resetButton.disabled = next;
@@ -421,6 +450,7 @@ function setBusy(next) {
         button.disabled = next;
     for (const button of canvasItems.querySelectorAll("button"))
         button.disabled = next;
+    renderAuthState();
     updateRetryButtons();
 }
 function createInstance(item, x, y, isNew = false) {
@@ -1119,7 +1149,7 @@ async function loadImage(operation, key) {
         operation.cancelled
     )
         return;
-    if (!isSecretKey(key)) {
+    if (!key) {
         if (activeImagePair === operation.imagePairKey) promptForKey();
         return;
     }
@@ -1382,6 +1412,7 @@ function cancelCombination() {
     selected = [];
     activeImagePair = null;
     activeDiscovery = null;
+    activePopoverImage = null;
     activeCombination = null;
     activeImageOperation = null;
     retryTextAvailable = false;
@@ -1396,10 +1427,7 @@ function cancelCombination() {
 function openSettings() {
     if (!busy) settingsDialog.showModal();
     modelSelect.value = readTextModel();
-    const modelText = `Text model: ${textModelLabel(getTextModel())}.`;
-    keyStatus.textContent = isSecretKey(getKey())
-        ? `Key ready for this tab. ${modelText}`
-        : `No key added yet. ${modelText}`;
+    renderAuthState();
 }
 
 search.addEventListener("input", renderInventory);
@@ -1409,55 +1437,94 @@ document
 document.querySelector("#help-open").addEventListener("click", () => {
     if (!busy) helpDialog.showModal();
 });
-keyForm.addEventListener("submit", (event) => {
-    if (event.submitter?.value === "cancel") return;
-    event.preventDefault();
+document.querySelector("#settings-close").addEventListener("click", () => {
+    settingsDialog.close();
+});
+function saveTextModelPreference() {
     const model = getTextModel();
     try {
         localStore?.setItem(TEXT_MODEL_STORAGE_KEY, model);
     } catch {
         /* storage may be blocked */
     }
-    const enteredKey = keyInput.value.trim();
-    if (enteredKey && !isSecretKey(enteredKey)) {
-        keyInput.value = "";
-        const existingKey = readTabKey();
-        keyStatus.textContent = existingKey
-            ? `That is not a valid sk_ Secret Key. Existing tab key kept. Text model: ${textModelLabel(model)}.`
-            : `That is not a valid sk_ Secret Key. Text model saved: ${textModelLabel(model)}.`;
-        announce("That is not a valid sk_ Secret Key. No key was changed.");
+    renderAuthState();
+    announce(`Text model saved: ${textModelLabel(model)}.`);
+}
+modelSelect.addEventListener("change", saveTextModelPreference);
+function invalidateAuthOperations() {
+    generation += 1;
+    cancelActiveDrags();
+    cancelAllImageOperations();
+    if (busy) {
+        cancelCombination();
         return;
     }
-    if (enteredKey) {
-        try {
-            tabStore?.setItem("pollen-craft:key", enteredKey);
-        } catch {
-            /* storage may be blocked */
-        }
-        keyStatus.textContent = `Settings saved for this tab. Text model: ${textModelLabel(model)}.`;
-        settingsDialog.close();
-        announce("Settings saved for this tab.");
-        return;
-    }
-    const existingKey = readTabKey();
-    keyStatus.textContent = existingKey
-        ? `Settings saved for this tab. Key ready. Text model: ${textModelLabel(model)}.`
-        : `Text model saved: ${textModelLabel(model)}. Add a Pollinations sk_ Secret Key to generate discoveries.`;
-    announce(
-        existingKey
-            ? "Settings saved for this tab."
-            : "Text model saved. A Pollinations sk_ Secret Key is still required.",
-    );
-});
-document.querySelector("#forget-key").addEventListener("click", () => {
-    keyInput.value = "";
+    selected = [];
+    activeImagePair = null;
+    activeDiscovery = null;
+    activePopoverImage = null;
+    activeCombination = null;
+    activeImageOperation = null;
+    retryTextAvailable = false;
+    resultPopover.hidden = true;
+    resultAnchor = null;
+    resultPopover.setAttribute("aria-busy", "false");
+    renderCanvas();
+}
+async function connectWallet() {
+    if (busy || authBusy) return;
+    authStatusMessage = "";
+    authBusy = true;
+    renderAuthState();
     try {
-        tabStore?.removeItem("pollen-craft:key");
-    } catch {
-        /* storage may be blocked */
+        const result = await oauth.begin();
+        globalThis.location.assign(result.authorizationUrl);
+    } catch (error) {
+        authBusy = false;
+        setAuthStatus(error);
+        announce(
+            error instanceof OAuthError
+                ? `${error.code}: ${error.message}`
+                : "Wallet connection could not be started. Try again.",
+        );
     }
-    keyStatus.textContent = `No key added yet. Text model: ${textModelLabel(getTextModel())}.`;
-});
+}
+async function processOAuthCallback() {
+    authBusy = true;
+    renderAuthState();
+    try {
+        const result = await oauth.handleCallback();
+        authBusy = false;
+        if (result.kind === "none") {
+            renderAuthState();
+            return;
+        }
+        if (result.kind === "success") {
+            authStatusMessage = "";
+            renderAuthState();
+            announce("Pollinations wallet connected for this tab.");
+            return;
+        }
+        setAuthStatus(result.error);
+        announce(`${result.error.code}: ${result.error.message}`);
+    } catch {
+        authBusy = false;
+        setAuthStatus(new OAuthError("OAUTH_CALLBACK_INVALID"));
+        announce(
+            "OAUTH_CALLBACK_INVALID: The wallet callback was invalid. Connect again.",
+        );
+    }
+}
+function disconnectWallet() {
+    if (busy || authBusy) return;
+    invalidateAuthOperations();
+    oauth.disconnect();
+    authStatusMessage = "";
+    renderAuthState();
+    announce("Pollinations wallet disconnected in this tab.");
+}
+connectButton.addEventListener("click", connectWallet);
+disconnectButton.addEventListener("click", disconnectWallet);
 document.querySelector("#result-close").addEventListener("click", closeResult);
 retryImage.addEventListener("click", () => {
     if (
@@ -1467,7 +1534,7 @@ retryImage.addEventListener("click", () => {
         activeImagePair
     ) {
         const key = getKey();
-        if (!isSecretKey(key)) {
+        if (!key) {
             promptForKey();
             return;
         }
@@ -1560,3 +1627,7 @@ for (const [index, seed] of SEEDS.entries())
     );
 renderCanvas();
 renderInventory();
+renderAuthState();
+queueMicrotask(() => {
+    void processOAuthCallback();
+});

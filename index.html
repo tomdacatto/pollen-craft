@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
     <meta name="description" content="Pollen Craft — combine ingredients into an infinite craft book." />
     <title>Pollen Craft</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -42,16 +43,15 @@
     <div class="live-region" id="live-region" role="status" aria-live="polite"></div>
 
     <dialog class="settings-dialog" id="settings-dialog" aria-labelledby="settings-title">
-      <form method="dialog" class="dialog-card" id="key-form">
-        <button class="dialog-close" value="cancel" aria-label="Close settings" type="submit">×</button>
+      <div class="dialog-card">
+        <button class="dialog-close" id="settings-close" aria-label="Close settings" type="button">×</button>
         <p class="inventory-kicker">Connection</p><h2 id="settings-title">Settings</h2>
-        <p class="dialog-copy">Use a Pollinations <code>sk_</code> Secret Key. It stays in this browser tab only; browser code can access it, so use a temporary or scoped key.</p>
-        <label for="api-key">Pollinations Secret Key</label><input id="api-key" name="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk_…" maxlength="180" />
+        <p class="dialog-copy">Connect your Pollinations wallet to generate discoveries. The temporary session connection stays in this browser tab only. No manual key is needed. Disconnect clears this tab; revoke an issued key in your Pollinations dashboard.</p>
+        <div class="dialog-row"><button class="primary-button" id="connect-wallet" type="button">Connect Pollinations wallet</button><button class="plain-button" id="disconnect-wallet" type="button" hidden>Disconnect</button></div>
         <label for="text-model">Text model</label><select id="text-model" name="text-model"></select>
         <p class="dialog-copy">The selected model is used for new or failed discoveries. Saved recipes stay cached.</p>
-        <div class="dialog-row"><button class="primary-button" id="settings-save" value="default" type="submit">Save settings</button><button class="plain-button" id="forget-key" value="cancel" type="button">Forget</button></div>
-        <p class="key-status" id="key-status" role="status">No key added yet.</p>
-      </form>
+        <p class="key-status" id="key-status" role="status" aria-live="polite">Not connected yet.</p>
+      </div>
     </dialog>
 
     <dialog class="help-dialog" id="help-dialog" aria-labelledby="help-title">
