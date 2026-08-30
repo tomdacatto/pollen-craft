@@ -209,6 +209,31 @@ button:disabled { cursor: wait; opacity: .55; }
     background: var(--lime-strong);
     transform: scale(1.03);
 }
+.canvas-chip.is-combining {
+    position: relative;
+    outline: 2px dashed var(--lavender-strong);
+    outline-offset: 3px;
+}
+.canvas-chip.pending-result {
+    border-style: dashed;
+    background: var(--lime);
+    cursor: wait;
+    animation: pendingPulse 1.1s ease-in-out infinite;
+}
+.pending-result .element-visual { border-style: dashed; }
+.merge-animation {
+    position: absolute;
+    z-index: 4;
+    width: 28px;
+    height: 28px;
+    border: 3px solid var(--ink);
+    border-radius: 50%;
+    background: var(--lime-strong);
+    box-shadow: 0 0 0 5px var(--lavender-strong), 0 0 0 8px var(--mint-strong);
+    pointer-events: none;
+    translate: -50% -50%;
+    animation: mergeBloom .36s cubic-bezier(.2,.8,.25,1) forwards;
+}
 .canvas-chip.is-new { animation: bloom .16s ease-out; }
 .element-visual {
     display: grid;
@@ -398,6 +423,8 @@ code { color: var(--ink); font-family: inherit; font-weight: 700; }
 .result-actions .plain-button:active { box-shadow: 0 0 0 var(--ink); }
 
 @keyframes bloom { from { opacity: 0; transform: scale(.9); } to { opacity: 1; transform: scale(1); } }
+@keyframes pendingPulse { 0%, 100% { opacity: .65; } 50% { opacity: 1; } }
+@keyframes mergeBloom { from { opacity: .95; transform: scale(.35) rotate(-12deg); } to { opacity: 0; transform: scale(2.8) rotate(12deg); } }
 @keyframes gardenSway {
     0%, 100% { translate: 0 0; }
     50% { translate: 3px -4px; }
@@ -406,6 +433,8 @@ code { color: var(--ink); font-family: inherit; font-weight: 700; }
 @media (prefers-reduced-motion: reduce) {
     .canvas-chip { transition: none; }
     .canvas-chip.is-dragging, .canvas-chip.is-drop-target { transform: none; }
+    .canvas-chip.pending-result { animation: none; }
+    .merge-animation { animation: none; opacity: 0; }
     .garden-flower, .garden-pollen { animation: none; }
 }
 

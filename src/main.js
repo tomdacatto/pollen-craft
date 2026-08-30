@@ -65,10 +65,9 @@ let inventoryDrag = null;
 let suppressInventoryClick = false;
 let suppressInventoryChip = null;
 let inventoryClickReset = null;
-let busy = false;
 let authBusy = false;
 let authStatusMessage = "";
-let generation = 0;
+let resetVersion = 0;
 let activeImagePair = null;
 let activeDiscovery = null;
 let activePopoverImage = null;
@@ -80,8 +79,13 @@ let resultReturnInstanceId = null;
 let activeCombination = null;
 let activeImageOperation = null;
 const imageOperations = new Map();
+const combinationOperations = new Map();
+const pairOperations = new Map();
+const claimedInstanceIds = new Set();
+const pendingResults = new Map();
 let retryTextAvailable = false;
 let nextInstanceId = 0;
+let nextOperationId = 0;
 let nextZIndex = 0;
 let nextPopoverRenderToken = 0;
 
@@ -304,8 +308,8 @@ function renderAuthState() {
     const connected = Boolean(getKey());
     connectButton.hidden = connected;
     disconnectButton.hidden = !connected;
-    connectButton.disabled = busy || authBusy;
-    disconnectButton.disabled = busy || authBusy;
+    connectButton.disabled = authBusy;
+    disconnectButton.disabled = authBusy;
     connectButton.textContent = authBusy
         ? "Connecting…"
         : "Connect Pollinations wallet";
@@ -430,9 +434,8 @@ function findOpenPlacement(item, preferredX, preferredY) {
     return positionWithinCanvas(preferredX, preferredY, width, height);
 }
 function updateRetryButtons() {
-    retryText.disabled = busy || !retryTextAvailable;
+    retryText.disabled = !retryTextAvailable;
     retryImage.disabled =
-        busy ||
         currentImageOperation()?.imagePending === true ||
         !activeDiscovery ||
         !activeImagePair;
@@ -441,19 +444,73 @@ function setTextBusy(next) {
     canvas.setAttribute("aria-busy", String(next));
     live.setAttribute("aria-busy", String(next));
 }
-function setBusy(next) {
-    busy = next;
-    modelSelect.disabled = next;
-    search.disabled = next;
-    resetButton.disabled = next;
-    document.querySelector("#settings-open").disabled = next;
-    document.querySelector("#help-open").disabled = next;
-    for (const button of inventory.querySelectorAll("button"))
-        button.disabled = next;
-    for (const button of canvasItems.querySelectorAll("button"))
-        button.disabled = next;
-    renderAuthState();
-    updateRetryButtons();
+function operationIsCurrent(operation) {
+    return (
+        combinationOperations.get(operation.id) === operation &&
+        operation.resetVersion === resetVersion &&
+        !operation.cancelled
+    );
+}
+function instanceIsClaimed(id) {
+    return claimedInstanceIds.has(id);
+}
+function releaseCombination(operation, preserveSourceIds = false) {
+    const sourceIds = [...operation.sourceIds];
+    combinationOperations.delete(operation.id);
+    if (pairOperations.get(operation.pairKey) === operation)
+        pairOperations.delete(operation.pairKey);
+    for (const id of sourceIds) claimedInstanceIds.delete(id);
+    operation.sourceIds = preserveSourceIds ? sourceIds : [];
+    pendingResults.delete(operation.id);
+    setTextBusy(combinationOperations.size > 0);
+    renderCanvas();
+}
+function cancelCombinationOperation(operation) {
+    if (!operation || !combinationOperations.has(operation.id)) return;
+    operation.cancelled = true;
+    releaseCombination(operation);
+}
+function cancelAllCombinationOperations() {
+    for (const operation of [...combinationOperations.values()]) {
+        operation.cancelled = true;
+        releaseCombination(operation);
+    }
+    combinationOperations.clear();
+    pairOperations.clear();
+    claimedInstanceIds.clear();
+    pendingResults.clear();
+    setTextBusy(combinationOperations.size > 0);
+    renderCanvas();
+}
+function showMergeAnimation(x, y) {
+    if (globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches)
+        return;
+    const burst = document.createElement("div");
+    burst.className = "merge-animation";
+    burst.setAttribute("aria-hidden", "true");
+    burst.style.left = `${x}px`;
+    burst.style.top = `${y}px`;
+    canvasItems.append(burst);
+    setTimeout(() => burst.remove(), 380);
+}
+function renderPendingResult(pending) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "canvas-chip pending-result";
+    chip.dataset.tone = "lime";
+    chip.dataset.pending = String(pending.operationId);
+    chip.style.left = `${pending.x}px`;
+    chip.style.top = `${pending.y}px`;
+    chip.setAttribute("aria-busy", "true");
+    chip.setAttribute("aria-label", "Combining ingredients, result loading");
+    chip.disabled = true;
+    const visual = document.createElement("span");
+    visual.className = "element-visual is-placeholder";
+    visual.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = "Combining…";
+    chip.append(visual, label);
+    canvasItems.append(chip);
 }
 function createInstance(item, x, y, isNew = false) {
     const point = positionWithinCanvas(x, y);
@@ -488,7 +545,9 @@ function renderCanvas(newId = null) {
         );
         chip.dataset.instance = instance.id;
         chip.dataset.pairKey = item.discovered ? item.pair : "";
-        chip.disabled = busy;
+        chip.classList.toggle("is-combining", instanceIsClaimed(instance.id));
+        chip.setAttribute("aria-busy", String(instanceIsClaimed(instance.id)));
+        chip.disabled = false;
         const label = document.createElement("span");
         label.textContent = item.name;
         chip.append(createElementVisual(item), label);
@@ -516,6 +575,7 @@ function renderCanvas(newId = null) {
         chip.style.left = `${point.x}px`;
         chip.style.top = `${point.y}px`;
     }
+    for (const pending of pendingResults.values()) renderPendingResult(pending);
     const focusId = newId ?? focusedInstanceId;
     if (focusId)
         canvasItems.querySelector(`[data-instance="${focusId}"]`)?.focus();
@@ -548,7 +608,7 @@ function renderInventory() {
         button.dataset.tone = itemTone(item);
         button.dataset.pair = item.pair ?? "";
         button.dataset.pairKey = item.discovered ? item.pair : "";
-        button.disabled = busy;
+        button.disabled = false;
         const name = document.createElement("small");
         name.textContent = item.name;
         button.append(createElementVisual(item), name);
@@ -576,8 +636,6 @@ function renderInventory() {
             ?.focus();
 }
 function placeFromInventory(item, x = null, y = null) {
-    if (busy) return;
-    generation += 1;
     retryTextAvailable = false;
     resultPopover.setAttribute("aria-busy", "false");
     resultPopover.hidden = true;
@@ -685,7 +743,7 @@ function cleanupDragGhost(ghost) {
 }
 
 function startInventoryDrag(event, item) {
-    if (busy || inventoryDrag) return;
+    if (inventoryDrag) return;
     const chip = event.currentTarget;
     chip.setPointerCapture(event.pointerId);
     const current = {
@@ -794,7 +852,7 @@ function startInventoryDrag(event, item) {
     };
 }
 function startDrag(event, id) {
-    if (busy || drag) return;
+    if (drag || instanceIsClaimed(id)) return;
     const instance = instances.get(id);
     if (!instance) return;
     const chip = event.currentTarget;
@@ -929,8 +987,7 @@ function findCollision(instance) {
     return best;
 }
 function activateInstance(id) {
-    if (busy) return;
-    generation += 1;
+    if (instanceIsClaimed(id)) return;
     resultPopover.hidden = true;
     resultPopover.setAttribute("aria-busy", "false");
     resultAnchor = null;
@@ -956,7 +1013,8 @@ function clearSelectionForCombination() {
     renderCanvas();
 }
 function combineInstances(first, second) {
-    if (busy || !first || !second || first.id === second.id) return;
+    if (!first || !second || first.id === second.id) return;
+    if (instanceIsClaimed(first.id) || instanceIsClaimed(second.id)) return;
     const firstItem = itemById(first.itemId);
     const secondItem = itemById(second.itemId);
     if (!firstItem || !secondItem) return;
@@ -989,8 +1047,9 @@ function startCombination({
         : null,
     returnFocusInstanceId = document.activeElement?.dataset?.instance ?? null,
 }) {
-    if (busy) return;
     const pairKey = canonicalPair(firstItem.id, secondItem.id);
+    const existing = pairOperations.get(pairKey);
+    if (existing && operationIsCurrent(existing)) return;
     const cached = findDiscovery(state, pairKey);
     const cachedItem = cached
         ? resolveInventoryItem(state, pairKey, cached)
@@ -1004,7 +1063,8 @@ function startCombination({
         return;
     }
     const operation = {
-        id: ++generation,
+        id: ++nextOperationId,
+        resetVersion,
         pairKey,
         firstItem,
         secondItem,
@@ -1021,6 +1081,15 @@ function startCombination({
         imagePairKey: cachedImagePair,
         imageDiscovery: cachedImageDiscovery,
     };
+    combinationOperations.set(operation.id, operation);
+    pairOperations.set(pairKey, operation);
+    for (const sourceId of operation.sourceIds)
+        claimedInstanceIds.add(sourceId);
+    pendingResults.set(operation.id, {
+        operationId: operation.id,
+        x: operation.x,
+        y: operation.y,
+    });
     activeCombination = operation;
     retryTextAvailable = false;
     activeImagePair = cachedImagePair;
@@ -1028,12 +1097,10 @@ function startCombination({
     activeImageOperation = cachedImagePair
         ? (imageOperations.get(cachedImagePair) ?? null)
         : null;
-    resultPopover.hidden = true;
-    resultPopover.setAttribute("aria-busy", "false");
-    resultAnchor = null;
-    setBusy(true);
-    setTextBusy(!cached);
+    if (resultPopover.hidden) resultPopover.setAttribute("aria-busy", "false");
+    setTextBusy(combinationOperations.size > 0);
     renderCanvas();
+    showMergeAnimation(operation.x, operation.y);
     announce(`Combining ${firstItem.name} + ${secondItem.name}`);
     (async () => {
         let stage = cached ? "image" : "idea";
@@ -1045,10 +1112,10 @@ function startCombination({
                     key,
                     operation.model,
                 ));
-            if (operation.id !== generation) return;
-            setTextBusy(false);
+            if (!operationIsCurrent(operation)) return;
+            setTextBusy(combinationOperations.size > 0);
             operation.discovery = { ...discovery };
-            if (!cached)
+            if (!cached && operation.resetVersion === resetVersion)
                 state = saveState(
                     gameReducer(state, {
                         type: "discover",
@@ -1070,26 +1137,27 @@ function startCombination({
                 ? resultItem.pair
                 : null;
             operation.imageDiscovery = discoveryData(resultItem);
-            activeImagePair = operation.imagePairKey;
-            activeDiscovery = operation.imageDiscovery;
-            activeImageOperation = operation.imagePairKey
-                ? (imageOperations.get(operation.imagePairKey) ?? null)
-                : null;
+            if (activeCombination === operation) {
+                activeImagePair = operation.imagePairKey;
+                activeDiscovery = operation.imageDiscovery;
+                activeImageOperation = operation.imagePairKey
+                    ? (imageOperations.get(operation.imagePairKey) ?? null)
+                    : null;
+            }
             for (const sourceId of operation.sourceIds)
                 instances.delete(sourceId);
-            operation.sourceIds = [];
+            releaseCombination(operation);
             const resultInstance = createInstance(
                 resultItem,
                 operation.x,
                 operation.y,
                 true,
             );
-            setBusy(false);
             renderCanvas(resultInstance.id);
             const cachedImage = operation.imagePairKey
                 ? imageCache.get(operation.imagePairKey)
                 : null;
-            if (cached)
+            if (cached && activeCombination === operation)
                 openResult(
                     activeDiscovery,
                     operation.x,
@@ -1100,26 +1168,30 @@ function startCombination({
                     false,
                     activeImageOperation,
                 );
-            announce(
-                cached
-                    ? `${activeDiscovery.name} is ready from your book.`
-                    : `${activeDiscovery.name} discovered and added to your book.`,
-            );
+            if (activeCombination === operation)
+                announce(
+                    cached
+                        ? `${activeDiscovery.name} is ready from your book.`
+                        : `${activeDiscovery.name} discovered and added to your book.`,
+                );
             stage = "image";
             if (key && !cachedImage && operation.imagePairKey)
                 loadImage(operation, key);
         } catch (error) {
-            if (operation.id === generation) {
-                setTextBusy(false);
-                setBusy(false);
+            if (operationIsCurrent(operation)) {
+                const sourceIds = [...operation.sourceIds];
+                releaseCombination(operation, true);
                 if (stage === "idea") {
                     resultReturnFocus = operation.returnFocus;
                     resultReturnInstanceId =
-                        operation.returnFocusInstanceId ??
-                        operation.sourceIds[0] ??
-                        null;
+                        operation.returnFocusInstanceId ?? sourceIds[0] ?? null;
                 }
-                openError(error, stage, operation.x, operation.y);
+                if (activeCombination === operation)
+                    openError(error, stage, operation.x, operation.y);
+                else
+                    announce(
+                        `${firstItem.name} + ${secondItem.name} could not be combined.`,
+                    );
             }
         }
     })();
@@ -1384,8 +1456,7 @@ function openError(error, stage, x, y, discovery = activeDiscovery) {
     announce(messageText);
 }
 function closeResult() {
-    generation += 1;
-    setTextBusy(false);
+    setTextBusy(combinationOperations.size > 0);
     resultPopover.hidden = true;
     activePopoverImage = null;
     resultAnchor = null;
@@ -1407,10 +1478,8 @@ function closeResult() {
     if (focusTarget && !focusTarget.disabled) focusTarget.focus();
 }
 function cancelCombination() {
-    if (!busy) return;
-    generation += 1;
-    setTextBusy(false);
-    setBusy(false);
+    if (!activeCombination) return;
+    cancelCombinationOperation(activeCombination);
     selected = [];
     activeImagePair = null;
     activeDiscovery = null;
@@ -1427,7 +1496,7 @@ function cancelCombination() {
     );
 }
 function openSettings() {
-    if (!busy) settingsDialog.showModal();
+    settingsDialog.showModal();
     modelSelect.value = readTextModel();
     renderAuthState();
 }
@@ -1437,7 +1506,7 @@ document
     .querySelector("#settings-open")
     .addEventListener("click", openSettings);
 document.querySelector("#help-open").addEventListener("click", () => {
-    if (!busy) helpDialog.showModal();
+    helpDialog.showModal();
 });
 document.querySelector("#settings-close").addEventListener("click", () => {
     settingsDialog.close();
@@ -1454,13 +1523,10 @@ function saveTextModelPreference() {
 }
 modelSelect.addEventListener("change", saveTextModelPreference);
 function invalidateAuthOperations() {
-    generation += 1;
+    resetVersion += 1;
     cancelActiveDrags();
+    cancelAllCombinationOperations();
     cancelAllImageOperations();
-    if (busy) {
-        cancelCombination();
-        return;
-    }
     selected = [];
     activeImagePair = null;
     activeDiscovery = null;
@@ -1474,7 +1540,7 @@ function invalidateAuthOperations() {
     renderCanvas();
 }
 async function connectWallet() {
-    if (busy || authBusy) return;
+    if (authBusy) return;
     authStatusMessage = "";
     authBusy = true;
     renderAuthState();
@@ -1518,7 +1584,7 @@ async function processOAuthCallback() {
     }
 }
 function disconnectWallet() {
-    if (busy || authBusy) return;
+    if (authBusy) return;
     invalidateAuthOperations();
     oauth.disconnect();
     authStatusMessage = "";
@@ -1530,7 +1596,6 @@ disconnectButton.addEventListener("click", disconnectWallet);
 document.querySelector("#result-close").addEventListener("click", closeResult);
 retryImage.addEventListener("click", () => {
     if (
-        !busy &&
         currentImageOperation()?.imagePending !== true &&
         activeDiscovery &&
         activeImagePair
@@ -1543,7 +1608,8 @@ retryImage.addEventListener("click", () => {
         const anchor = resultAnchor ?? { x: 20, y: 62 };
         const imageDiscovery = discoveryData(activeDiscovery);
         const operation = {
-            id: ++generation,
+            id: ++nextOperationId,
+            resetVersion,
             imagePairKey: activeImagePair,
             discovery: imageDiscovery,
             imageDiscovery,
@@ -1557,7 +1623,7 @@ retryImage.addEventListener("click", () => {
     }
 });
 retryText.addEventListener("click", () => {
-    if (!busy && retryTextAvailable && activeCombination)
+    if (retryTextAvailable && activeCombination)
         startCombination({
             firstItem: activeCombination.firstItem,
             secondItem: activeCombination.secondItem,
@@ -1569,9 +1635,10 @@ retryText.addEventListener("click", () => {
         });
 });
 resetButton.addEventListener("click", () => {
-    if (busy || !globalThis.confirm("Reset your local discovery book?")) return;
-    generation += 1;
+    if (!globalThis.confirm("Reset your local discovery book?")) return;
+    resetVersion += 1;
     cancelActiveDrags();
+    cancelAllCombinationOperations();
     cancelAllImageOperations();
     state = createInitialState();
     for (const key of [STORAGE_KEY, LEGACY_STORAGE_KEY]) {
@@ -1594,15 +1661,13 @@ resetButton.addEventListener("click", () => {
 globalThis.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
         if (settingsDialog.open || helpDialog.open) return;
-        if (busy) {
-            event.preventDefault();
-            cancelCombination();
-            return;
-        }
         if (!resultPopover.hidden) {
             event.preventDefault();
             closeResult();
-        } else if (!selected.length || busy) return;
+        } else if (activeCombination && operationIsCurrent(activeCombination)) {
+            event.preventDefault();
+            cancelCombination();
+        } else if (!selected.length) return;
         else {
             selected = [];
             renderCanvas();
@@ -1617,8 +1682,9 @@ globalThis.addEventListener("resize", () => {
         positionResult(resultAnchor.x, resultAnchor.y);
 });
 globalThis.addEventListener("pagehide", () => {
-    generation += 1;
+    resetVersion += 1;
     cancelActiveDrags();
+    cancelAllCombinationOperations();
     cancelAllImageOperations();
     imageCache.clear();
 });
