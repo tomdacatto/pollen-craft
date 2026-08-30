@@ -142,7 +142,10 @@ function reconcileEvictedImage(pairKey, entry) {
     const operations = new Set();
     const cachedOperation = imageOperations.get(pairKey);
     if (cachedOperation) operations.add(cachedOperation);
-    if (activeImageOperation?.imagePairKey === pairKey)
+    if (
+        activeImageOperation?.imagePairKey === pairKey &&
+        (!cachedOperation || cachedOperation === activeImageOperation)
+    )
         operations.add(activeImageOperation);
     for (const operation of operations) {
         clearImageTimer(operation);
@@ -198,6 +201,7 @@ function handleImageFailure(
     renderToken = null,
     renderedImage = null,
 ) {
+    if (operation && imageOperations.get(pairKey) !== operation) return false;
     if (
         renderToken !== null &&
         (!popoverMatches({ token: renderToken, pairKey }) ||
