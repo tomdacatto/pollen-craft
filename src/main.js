@@ -133,10 +133,55 @@ function rebindOpenPopover({ operationId, pairKey = null } = {}) {
     return true;
 }
 
-function currentImageOperation() {
-    return activeImageOperation?.imagePairKey === activeImagePair
-        ? activeImageOperation
-        : null;
+function sameDiscovery(first, second) {
+    return (
+        first?.name === second?.name &&
+        first?.description === second?.description
+    );
+}
+
+function popoverOwnsImageOperation(operation) {
+    if (
+        !operation?.imagePairKey ||
+        !resultAnchor ||
+        !popoverMatches({ pairKey: operation.imagePairKey })
+    )
+        return false;
+    const binding = popoverBinding.current;
+    if (binding?.kind === "operation" && binding.operationId !== operation.id)
+        return false;
+    const visibleDiscovery =
+        activePopoverImage?.pairKey === operation.imagePairKey
+            ? activePopoverImage.discovery
+            : activeDiscovery;
+    return sameDiscovery(visibleDiscovery, operation.imageDiscovery);
+}
+
+function boundPopoverImage() {
+    if (resultPopover.hidden || !resultAnchor) return null;
+    const binding = popoverBinding.current;
+    if (!binding?.pairKey) return null;
+    const pairKey = binding.pairKey;
+    const failure = imageFailures.get(`image:${pairKey}`);
+    const operation =
+        failure?.operation ??
+        (activeCombination?.id === binding.operationId
+            ? activeCombination
+            : null) ??
+        (activeImageOperation?.imagePairKey === pairKey
+            ? activeImageOperation
+            : null);
+    const item = itemByPair(pairKey);
+    const discovery =
+        (activePopoverImage?.pairKey === pairKey
+            ? activePopoverImage.discovery
+            : null) ??
+        operation?.imageDiscovery ??
+        (binding.kind === "discovery" && activeImagePair === pairKey
+            ? activeDiscovery
+            : null) ??
+        discoveryData(item);
+    return discovery ? { binding, discovery, operation, pairKey } : null;
 }
 
 function reconcileEvictedImage(pairKey, entry) {
@@ -230,8 +275,11 @@ function handleImageFailure(
         if (activeImageOperation === activeOperation)
             activeImageOperation = null;
     }
+    const ownsPopover = operation
+        ? popoverOwnsImageOperation(operation)
+        : popoverMatches({ pairKey });
     const popoverImage =
-        popoverMatches({ pairKey }) &&
+        ownsPopover &&
         activePopoverImage?.pairKey === pairKey &&
         activePopoverImage.url === url
             ? activePopoverImage
@@ -511,10 +559,9 @@ function findOpenPlacement(item, preferredX, preferredY) {
 }
 function updateRetryButtons() {
     retryText.disabled = !retryTextAvailable;
+    const boundImage = boundPopoverImage();
     retryImage.disabled =
-        currentImageOperation()?.imagePending === true ||
-        !activeDiscovery ||
-        !activeImagePair;
+        !boundImage || boundImage.operation?.imagePending === true;
 }
 function retryFailedResult(id) {
     const failure = failedResults.get(id) ?? imageFailures.get(id);
@@ -1229,6 +1276,14 @@ function startCombination({
     if (!combinationOperations.begin(operation)) return;
     if (rebindPopover)
         rebindOpenPopover({ operationId: operation.id, pairKey: null });
+    else if (!resultPopover.hidden) {
+        resultPopover.hidden = true;
+        clearPopoverBinding();
+        resultAnchor = null;
+        activeImagePair = null;
+        activeDiscovery = null;
+        activeImageOperation = null;
+    }
     pendingResults.set(operation.id, {
         operationId: operation.id,
         x: operation.x,
@@ -1388,18 +1443,14 @@ function startCombination({
     })();
 }
 function updateOpenPopoverImage(operation, imageUrl, imageOperation = null) {
-    if (
-        !popoverMatches({ pairKey: operation.imagePairKey }) ||
-        !activeDiscovery ||
-        !resultAnchor
-    )
-        return;
-    const boundToOperation =
-        popoverBinding.current?.operationId === operation.id ||
-        popoverBinding.current?.kind === "discovery";
-    if (!boundToOperation) return;
+    if (!popoverOwnsImageOperation(operation)) return;
+    const discovery =
+        activePopoverImage?.pairKey === operation.imagePairKey
+            ? activePopoverImage.discovery
+            : activeDiscovery;
+    if (!discovery) return;
     openResult(
-        activeDiscovery,
+        discovery,
         resultAnchor.x,
         resultAnchor.y,
         "Illustrated",
@@ -1481,16 +1532,13 @@ async function loadImage(operation, key) {
                 y: operation.y ?? 62,
                 label: `${operation.imageDiscovery.name} illustration unavailable — retry`,
             });
-            if (
-                popoverMatches({ pairKey: operation.imagePairKey }) &&
-                resultAnchor
-            )
+            if (popoverOwnsImageOperation(operation))
                 openError(
                     error,
                     "image",
                     resultAnchor.x,
                     resultAnchor.y,
-                    activeDiscovery ?? operation.imageDiscovery,
+                    operation.imageDiscovery,
                     operation,
                 );
             else
@@ -1714,8 +1762,11 @@ function openError(
     resultContent.append(message);
     positionResult(x, y);
     retryTextAvailable = false;
+    const boundImage = boundPopoverImage();
     retryImage.disabled =
-        stage !== "image" || currentImageOperation()?.imagePending === true;
+        stage !== "image" ||
+        !boundImage ||
+        boundImage.operation?.imagePending === true;
     announce(messageText);
 }
 function closeResult() {
@@ -1860,22 +1911,19 @@ connectButton.addEventListener("click", connectWallet);
 disconnectButton.addEventListener("click", disconnectWallet);
 document.querySelector("#result-close").addEventListener("click", closeResult);
 retryImage.addEventListener("click", () => {
-    if (
-        currentImageOperation()?.imagePending !== true &&
-        activeDiscovery &&
-        activeImagePair
-    ) {
+    const boundImage = boundPopoverImage();
+    if (boundImage && boundImage.operation?.imagePending !== true) {
         const key = getKey();
         if (!key) {
             promptForKey();
             return;
         }
         const anchor = resultAnchor ?? { x: 20, y: 62 };
-        const imageDiscovery = discoveryData(activeDiscovery);
+        const imageDiscovery = boundImage.discovery;
         const operation = {
             id: ++nextOperationId,
             resetVersion,
-            imagePairKey: activeImagePair,
+            imagePairKey: boundImage.pairKey,
             discovery: imageDiscovery,
             imageDiscovery,
             x: anchor.x,

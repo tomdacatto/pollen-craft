@@ -169,6 +169,42 @@ test("idea retry keeps the open popover on the retried operation", () => {
     );
 });
 
+test("a late image failure cannot reopen an old popover over a new operation", () => {
+    const popover = createPopoverBinding();
+    const first = { id: 21, imagePairKey: "fire+water" };
+    const second = { id: 22, imagePairKey: "earth+wind" };
+    popover.bind({
+        kind: "operation",
+        operationId: first.id,
+        pairKey: first.imagePairKey,
+    });
+
+    // Starting the unrelated operation closes the old visible binding.
+    popover.clear();
+    popover.bind({
+        kind: "operation",
+        operationId: second.id,
+        pairKey: second.imagePairKey,
+    });
+
+    let renderedOperation = null;
+    if (
+        popover.matches({
+            operationId: first.id,
+            pairKey: first.imagePairKey,
+        })
+    )
+        renderedOperation = first.id;
+    assert.equal(renderedOperation, null);
+    assert.equal(
+        popover.matches({
+            operationId: second.id,
+            pairKey: second.imagePairKey,
+        }),
+        true,
+    );
+});
+
 test("canonicalPair makes combinations order-independent", () => {
     assert.equal(canonicalPair(" Water ", "FIRE"), "fire+water");
     assert.equal(canonicalPair("fire", "fire"), "fire+fire");
