@@ -144,7 +144,7 @@ export function createMergeAnimation({
             sparkle.style.setProperty("--sparkle-delay", `${index * 18}ms`);
             sparkle.dataset.sparkleTone =
                 index % 3 === 0 ? "yellow" : index % 2 ? "lavender" : "lime";
-            layer.append(sparkle);
+            operation.orbit.append(sparkle);
             operation.nodes.push(sparkle);
         }
     }
@@ -183,6 +183,7 @@ export function createMergeAnimation({
                 phase: "waiting",
                 settled: false,
                 settle: resolve,
+                requestResolve: null,
                 onComplete,
                 cancel() {
                     finish(operation, false);
@@ -233,27 +234,27 @@ export function createMergeAnimation({
             layer.append(orbit);
             operation.orbit = orbit;
             operation.nodes.push(orbit);
+            const requestResolve = () => {
+                if (operation.settled || operation.phase !== "waiting")
+                    return false;
+                const elapsed = now() - operation.startedAt;
+                const wait = reducedMotion ? 0 : Math.max(0, minWait - elapsed);
+                clearTimer(operation.waitTimer);
+                if (reducedMotion)
+                    queueMicrotask(() => beginResolve(operation));
+                else
+                    operation.waitTimer = setTimer(
+                        () => beginResolve(operation),
+                        wait,
+                    );
+                return true;
+            };
+            operation.requestResolve = requestResolve;
             return {
                 promise,
                 cancel: operation.cancel,
                 midpoint,
-                requestResolve: () => {
-                    if (operation.settled || operation.phase !== "waiting")
-                        return false;
-                    const elapsed = now() - operation.startedAt;
-                    const wait = reducedMotion
-                        ? 0
-                        : Math.max(0, minWait - elapsed);
-                    clearTimer(operation.waitTimer);
-                    if (reducedMotion)
-                        queueMicrotask(() => beginResolve(operation));
-                    else
-                        operation.waitTimer = setTimer(
-                            () => beginResolve(operation),
-                            wait,
-                        );
-                    return true;
-                },
+                requestResolve,
             };
         },
         resolve(id) {
