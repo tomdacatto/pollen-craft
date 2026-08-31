@@ -147,18 +147,17 @@ button:disabled { cursor: wait; opacity: .55; }
 .garden-flower--lower { right: 13%; bottom: 16%; transform: scale(1.08); animation-delay: -5s; }
 .garden-pollen {
     position: absolute;
-    width: 7px;
-    height: 7px;
-    border: 1px solid var(--ink);
+    width: 5px;
+    height: 5px;
     border-radius: 50%;
-    background: var(--lime-strong);
-    box-shadow: 9px -12px 0 -1px var(--lavender-strong), 20px 5px 0 -1px var(--mint-strong);
-    opacity: .78;
-    animation: gardenSway 10s ease-in-out infinite reverse;
+    background: var(--lavender-strong);
+    opacity: .3;
+    pointer-events: none;
+    animation: none;
 }
 .garden-pollen--one { top: 32%; left: 41%; }
-.garden-pollen--two { top: 22%; right: 24%; transform: scale(.72); animation-delay: -3s; }
-.garden-pollen--three { right: 36%; bottom: 28%; transform: scale(.56); animation-delay: -7s; }
+.garden-pollen--two { top: 22%; right: 24%; background: var(--mint-strong); }
+.garden-pollen--three { right: 36%; bottom: 28%; background: var(--lime-strong); }
 .canvas-hint {
     position: absolute;
     top: 20px;
@@ -170,6 +169,7 @@ button:disabled { cursor: wait; opacity: .55; }
     pointer-events: none;
 }
 .canvas-items { position: absolute; inset: 0; z-index: 2; }
+#merge-layer { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
 .canvas-chip {
     position: absolute;
     display: inline-flex;
@@ -210,34 +210,47 @@ button:disabled { cursor: wait; opacity: .55; }
     transform: scale(1.03);
 }
 .canvas-chip.is-combining {
-    position: relative;
-    outline: 2px dashed var(--lavender-strong);
-    outline-offset: 3px;
+    opacity: .42;
 }
 .canvas-chip[aria-disabled="true"] { cursor: wait; }
 .canvas-chip.pending-result {
-    border-style: dashed;
     background: var(--lime);
     cursor: wait;
-    animation: pendingPulse 1.1s ease-in-out infinite;
+    box-shadow: 2px 2px 0 var(--ink);
+    animation: none;
 }
 .canvas-chip.failure-result {
-    border-style: dashed;
     background: var(--lavender);
 }
-.pending-result .element-visual { border-style: dashed; }
-.merge-animation {
+.merge-clone {
     position: absolute;
-    z-index: 4;
-    width: 28px;
-    height: 28px;
-    border: 3px solid var(--ink);
+    margin: 0;
+    box-shadow: none !important;
+    pointer-events: none;
+    transition: transform .34s cubic-bezier(.2,.8,.25,1);
+    transform: translate(0, 0);
+}
+.merge-clone.is-moving { transform: translate(var(--merge-dx), var(--merge-dy)); }
+.merge-target-highlight {
+    position: absolute;
+    width: 60px;
+    height: 60px;
+    border: 4px solid var(--lime-strong);
     border-radius: 50%;
-    background: var(--lime-strong);
-    box-shadow: 0 0 0 5px var(--lavender-strong), 0 0 0 8px var(--mint-strong);
+    box-shadow: 0 0 0 3px var(--lavender-strong);
+    opacity: .9;
+    translate: -50% -50%;
+}
+.merge-burst {
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    border: 3px solid var(--lime-strong);
+    border-radius: 50%;
+    background: var(--lavender-strong);
     pointer-events: none;
     translate: -50% -50%;
-    animation: mergeBloom .36s cubic-bezier(.2,.8,.25,1) forwards;
+    animation: mergeBurst .11s ease-out forwards;
 }
 .canvas-chip.is-new { animation: bloom .16s ease-out; }
 .element-visual {
@@ -428,8 +441,7 @@ code { color: var(--ink); font-family: inherit; font-weight: 700; }
 .result-actions .plain-button:active { box-shadow: 0 0 0 var(--ink); }
 
 @keyframes bloom { from { opacity: 0; transform: scale(.9); } to { opacity: 1; transform: scale(1); } }
-@keyframes pendingPulse { 0%, 100% { opacity: .65; } 50% { opacity: 1; } }
-@keyframes mergeBloom { from { opacity: .95; transform: scale(.35) rotate(-12deg); } to { opacity: 0; transform: scale(2.8) rotate(12deg); } }
+@keyframes mergeBurst { from { opacity: .95; transform: scale(.65); } to { opacity: 0; transform: scale(2.4); } }
 @keyframes gardenSway {
     0%, 100% { translate: 0 0; }
     50% { translate: 3px -4px; }
@@ -438,8 +450,7 @@ code { color: var(--ink); font-family: inherit; font-weight: 700; }
 @media (prefers-reduced-motion: reduce) {
     .canvas-chip { transition: none; }
     .canvas-chip.is-dragging, .canvas-chip.is-drop-target { transform: none; }
-    .canvas-chip.pending-result { animation: none; }
-    .merge-animation { animation: none; opacity: 0; }
+    .merge-clone, .merge-target-highlight, .merge-burst { transition: none; animation: none; opacity: 0; }
     .garden-flower, .garden-pollen { animation: none; }
 }
 

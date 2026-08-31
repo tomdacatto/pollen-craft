@@ -46,6 +46,9 @@ export function createMergeOperationRegistry() {
         getByPair(pairKey) {
             return pairs.get(pairKey) ?? null;
         },
+        values() {
+            return [...active.values()];
+        },
         isCurrent,
         isClaimed(sourceId) {
             const owner = claims.get(sourceId);

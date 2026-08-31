@@ -21,6 +21,7 @@ import {
     saveState,
 } from "./game.js";
 import { createImageCache } from "./image-cache.js";
+import { createMergeAnimation, visualMidpoint } from "./merge-animation.js";
 import {
     createOAuthClient,
     initializeOAuthStorage,
@@ -37,6 +38,7 @@ initializeOAuthStorage(tabStore);
 const api = createApiClient();
 const canvas = document.querySelector("#crafting-canvas");
 const canvasItems = document.querySelector("#canvas-items");
+const mergeLayer = document.querySelector("#merge-layer");
 const inventory = document.querySelector("#inventory-chips");
 const search = document.querySelector("#inventory-search");
 const resultPopover = document.querySelector("#result-popover");
@@ -86,6 +88,10 @@ let activeImageOperation = null;
 const popoverBinding = createPopoverBinding();
 const imageOperations = new Map();
 const combinationOperations = createMergeOperationRegistry();
+const mergeAnimation = createMergeAnimation({
+    canvas,
+    layer: mergeLayer,
+});
 const pendingResults = new Map();
 const failedResults = new Map();
 const imageFailures = new Map();
@@ -544,6 +550,9 @@ function positionWithinCanvas(x, y, width = 44, height = 44) {
         y: Math.max(38, Math.min(y, Math.max(38, rect.height - height - 8))),
     };
 }
+function positionAtCanvasCenter(x, y, width, height) {
+    return positionWithinCanvas(x - width / 2, y - height / 2, width, height);
+}
 function findOpenPlacement(item, preferredX, preferredY) {
     const width = Math.min(230, Math.max(80, item.name.length * 8 + 48));
     const height = 44;
@@ -639,37 +648,32 @@ function operationIsCurrent(operation) {
 function instanceIsClaimed(id) {
     return combinationOperations.isClaimed(id);
 }
-function releaseCombination(operation, preserveSourceIds = false) {
+function releaseCombination(
+    operation,
+    preserveSourceIds = false,
+    { render = true } = {},
+) {
     combinationOperations.finish(operation, {
         preserveSources: preserveSourceIds,
     });
     pendingResults.delete(operation.id);
     setTextBusy(combinationOperations.size > 0);
-    renderCanvas();
+    if (render) renderCanvas();
 }
 function cancelCombinationOperation(operation) {
     if (!operation || !combinationOperations.get(operation.id)) return;
     combinationOperations.cancel(operation);
+    mergeAnimation.cancel(operation.id);
     pendingResults.delete(operation.id);
     setTextBusy(combinationOperations.size > 0);
     renderCanvas();
 }
 function cancelAllCombinationOperations() {
-    combinationOperations.cancelAll();
+    for (const operation of combinationOperations.cancelAll())
+        mergeAnimation.cancel(operation.id);
     pendingResults.clear();
     setTextBusy(combinationOperations.size > 0);
     renderCanvas();
-}
-function showMergeAnimation(x, y) {
-    if (globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches)
-        return;
-    const burst = document.createElement("div");
-    burst.className = "merge-animation";
-    burst.setAttribute("aria-hidden", "true");
-    burst.style.left = `${x}px`;
-    burst.style.top = `${y}px`;
-    canvasItems.append(burst);
-    setTimeout(() => burst.remove(), 380);
 }
 function renderPendingResult(pending) {
     const chip = document.createElement("button");
@@ -677,7 +681,8 @@ function renderPendingResult(pending) {
     chip.className = "canvas-chip pending-result";
     chip.dataset.tone = "lime";
     chip.dataset.pending = String(pending.operationId);
-    const point = positionWithinCanvas(pending.x, pending.y, 160, 44);
+    chip.style.width = "160px";
+    const point = positionAtCanvasCenter(pending.x, pending.y, 160, 44);
     chip.style.left = `${point.x}px`;
     chip.style.top = `${point.y}px`;
     chip.setAttribute("aria-busy", "true");
@@ -697,7 +702,7 @@ function renderFailureResult(failure) {
     chip.className = "canvas-chip failure-result";
     chip.dataset.tone = "lavender";
     chip.dataset.failure = String(failure.id);
-    const point = positionWithinCanvas(failure.x, failure.y, 190, 44);
+    const point = positionAtCanvasCenter(failure.x, failure.y, 190, 44);
     chip.style.left = `${point.x}px`;
     chip.style.top = `${point.y}px`;
     chip.setAttribute("aria-label", `Retry ${failure.label}`);
@@ -790,6 +795,110 @@ function renderCanvas(newId = null) {
     const focusId = newId ?? focusedInstanceId;
     if (focusId)
         canvasItems.querySelector(`[data-instance="${focusId}"]`)?.focus();
+}
+function commitCombination(operation) {
+    const resultItem = operation.resultItem;
+    if (!resultItem || !operationIsCurrent(operation)) return;
+    for (const sourceId of operation.sourceIds) instances.delete(sourceId);
+    releaseCombination(operation, false, { render: false });
+    const resultWidth = Math.min(
+        230,
+        Math.max(80, resultItem.name.length * 8 + 48),
+    );
+    const resultPoint = positionAtCanvasCenter(
+        operation.x,
+        operation.y,
+        resultWidth,
+        44,
+    );
+    const resultInstance = createInstance(
+        resultItem,
+        resultPoint.x,
+        resultPoint.y,
+        true,
+    );
+    if (!resultInstance) return;
+    const cachedImage = operation.imagePairKey
+        ? imageCache.get(operation.imagePairKey)
+        : null;
+    if (
+        (operation.cached || operation.rebindPopover) &&
+        activeCombination === operation
+    ) {
+        openResult(
+            operation.rebindPopover ? operation.discovery : activeDiscovery,
+            operation.x,
+            operation.y,
+            operation.cached ? "In your book" : "Discovery",
+            cachedImage?.url ?? null,
+            false,
+            false,
+            activeImageOperation,
+            operation,
+        );
+    }
+    if (activeCombination === operation)
+        announce(
+            operation.cached
+                ? `${activeDiscovery.name} is ready from your book.`
+                : `${activeDiscovery.name} discovered and added to your book.`,
+        );
+    operation.stage = "image";
+    if (getKey() && !cachedImage && operation.imagePairKey)
+        loadImage(operation, getKey());
+}
+function failCombination(operation) {
+    if (!operationIsCurrent(operation)) return;
+    const sourceIds = [...operation.sourceIds];
+    releaseCombination(operation, true, { render: false });
+    failedResults.set(operation.id, {
+        id: operation.id,
+        stage: operation.stage,
+        label:
+            operation.stage === "idea"
+                ? "Idea unavailable — retry"
+                : `${operation.discovery?.name ?? "Result"} unavailable — retry`,
+        firstItem: operation.firstItem,
+        secondItem: operation.secondItem,
+        sourceIds,
+        x: operation.x,
+        y: operation.y,
+        returnFocus: operation.returnFocus,
+        returnFocusInstanceId: operation.returnFocusInstanceId,
+    });
+    if (operation.stage === "idea") {
+        resultReturnFocus = operation.returnFocus;
+        resultReturnInstanceId =
+            operation.returnFocusInstanceId ?? sourceIds[0] ?? null;
+    }
+    if (activeCombination === operation)
+        openError(
+            operation.apiError,
+            operation.stage,
+            operation.x,
+            operation.y,
+            operation.discovery ?? activeDiscovery,
+            operation,
+        );
+    else
+        announce(
+            `${operation.firstItem.name} + ${operation.secondItem.name} could not be combined. Retry is available on the canvas.`,
+        );
+    renderCanvas();
+}
+function settleCombination(operation) {
+    if (!operationIsCurrent(operation) || !operation.visualReady) return;
+    if (operation.apiState === "pending") {
+        pendingResults.set(operation.id, {
+            operationId: operation.id,
+            x: operation.x,
+            y: operation.y,
+        });
+        renderCanvas();
+        return;
+    }
+    if (operation.apiState === "failure") failCombination(operation);
+    else if (operation.apiState === "success") commitCombination(operation);
 }
 function renderInventory() {
     const query = displayNameKey(search.value);
@@ -1258,6 +1367,7 @@ function startCombination({
     sourceIds = [],
     x,
     y,
+    topmostSourceId = sourceIds[0] ?? null,
     returnFocus = document.activeElement?.isConnected
         ? document.activeElement
         : null,
@@ -1296,8 +1406,15 @@ function startCombination({
         returnFocus,
         returnFocusInstanceId,
         rebindPopover,
+        topmostSourceId,
         imagePairKey: cachedImagePair,
         imageDiscovery: cachedImageDiscovery,
+        cached: Boolean(cached),
+        stage: cached ? "image" : "idea",
+        apiState: "pending",
+        apiError: null,
+        resultItem: null,
+        visualReady: false,
     };
     if (!combinationOperations.begin(operation)) return;
     if (rebindPopover)
@@ -1310,11 +1427,6 @@ function startCombination({
         activeDiscovery = null;
         activeImageOperation = null;
     }
-    pendingResults.set(operation.id, {
-        operationId: operation.id,
-        x: operation.x,
-        y: operation.y,
-    });
     activeCombination = operation;
     retryTextAvailable = false;
     activeImagePair = cachedImagePair;
@@ -1325,10 +1437,26 @@ function startCombination({
     if (resultPopover.hidden) resultPopover.setAttribute("aria-busy", "false");
     setTextBusy(combinationOperations.size > 0);
     renderCanvas();
-    showMergeAnimation(operation.x, operation.y);
+    const sourceElements = operation.sourceIds
+        .map((id) => canvasItems.querySelector(`[data-instance="${id}"]`))
+        .filter(Boolean);
+    const visual = mergeAnimation.begin({
+        id: operation.id,
+        sourceElements,
+        targetElement: sourceElements[1],
+        topmostSourceId: operation.topmostSourceId,
+        onComplete: () => {
+            if (!operationIsCurrent(operation)) return;
+            operation.visualReady = true;
+            settleCombination(operation);
+        },
+    });
+    if (visual.midpoint) {
+        operation.x = visual.midpoint.x;
+        operation.y = visual.midpoint.y;
+    }
     announce(`Combining ${firstItem.name} + ${secondItem.name}`);
     (async () => {
-        let stage = cached ? "image" : "idea";
         try {
             const discovery =
                 cached ||
@@ -1362,6 +1490,7 @@ function startCombination({
                 ? resultItem.pair
                 : null;
             operation.imageDiscovery = discoveryData(resultItem);
+            operation.resultItem = resultItem;
             if (activeCombination === operation) {
                 activeImagePair = operation.imagePairKey;
                 activeDiscovery = operation.imageDiscovery;
@@ -1379,91 +1508,14 @@ function startCombination({
                     0,
                     true,
                 );
-            for (const sourceId of operation.sourceIds)
-                instances.delete(sourceId);
-            releaseCombination(operation);
-            const resultInstance = createInstance(
-                resultItem,
-                operation.x,
-                operation.y,
-                true,
-            );
-            if (!resultInstance)
-                throw new ApiError(
-                    "The result could not be placed on the canvas.",
-                    "canvas_full",
-                    0,
-                    true,
-                );
-            renderCanvas(resultInstance.id);
-            const cachedImage = operation.imagePairKey
-                ? imageCache.get(operation.imagePairKey)
-                : null;
-            if (
-                (cached || operation.rebindPopover) &&
-                activeCombination === operation
-            ) {
-                openResult(
-                    operation.rebindPopover
-                        ? operation.discovery
-                        : activeDiscovery,
-                    operation.x,
-                    operation.y,
-                    cached ? "In your book" : "Discovery",
-                    cachedImage?.url ?? null,
-                    false,
-                    false,
-                    activeImageOperation,
-                    operation,
-                );
-            }
-            if (activeCombination === operation)
-                announce(
-                    cached
-                        ? `${activeDiscovery.name} is ready from your book.`
-                        : `${activeDiscovery.name} discovered and added to your book.`,
-                );
-            stage = "image";
-            if (key && !cachedImage && operation.imagePairKey)
-                loadImage(operation, key);
+            operation.stage = "image";
+            operation.apiState = "success";
+            settleCombination(operation);
         } catch (error) {
             if (operationIsCurrent(operation)) {
-                const sourceIds = [...operation.sourceIds];
-                releaseCombination(operation, true);
-                failedResults.set(operation.id, {
-                    id: operation.id,
-                    stage,
-                    label:
-                        stage === "idea"
-                            ? "Idea unavailable — retry"
-                            : `${operation.discovery?.name ?? "Result"} unavailable — retry`,
-                    firstItem: operation.firstItem,
-                    secondItem: operation.secondItem,
-                    sourceIds,
-                    x: operation.x,
-                    y: operation.y,
-                    returnFocus: operation.returnFocus,
-                    returnFocusInstanceId: operation.returnFocusInstanceId,
-                });
-                if (stage === "idea") {
-                    resultReturnFocus = operation.returnFocus;
-                    resultReturnInstanceId =
-                        operation.returnFocusInstanceId ?? sourceIds[0] ?? null;
-                }
-                if (activeCombination === operation)
-                    openError(
-                        error,
-                        stage,
-                        operation.x,
-                        operation.y,
-                        operation.discovery ?? activeDiscovery,
-                        operation,
-                    );
-                else
-                    announce(
-                        `${firstItem.name} + ${secondItem.name} could not be combined. Retry is available on the canvas.`,
-                    );
-                renderCanvas();
+                operation.apiState = "failure";
+                operation.apiError = error;
+                settleCombination(operation);
             }
         }
     })();
@@ -2033,9 +2085,40 @@ globalThis.addEventListener("keydown", (event) => {
     }
 });
 globalThis.addEventListener("resize", () => {
+    const activeOperations = combinationOperations.values();
+    for (const operation of activeOperations)
+        if (operationIsCurrent(operation)) mergeAnimation.cancel(operation.id);
     for (const instance of instances.values())
         Object.assign(instance, positionWithinCanvas(instance.x, instance.y));
     renderCanvas();
+    for (const operation of activeOperations) {
+        if (!operationIsCurrent(operation)) continue;
+        const sourceElements = operation.sourceIds
+            .map((id) => canvasItems.querySelector(`[data-instance="${id}"]`))
+            .filter(Boolean);
+        const sourceRects = sourceElements.map((element) =>
+            element.getBoundingClientRect(),
+        );
+        const canvasRect = canvas.getBoundingClientRect();
+        if (sourceRects.length >= 2) {
+            const midpoint = visualMidpoint(
+                sourceRects[0],
+                sourceRects[1],
+                canvasRect,
+            );
+            operation.x = midpoint.x;
+            operation.y = midpoint.y;
+        }
+        operation.visualReady = true;
+        if (operation.apiState === "pending")
+            pendingResults.set(operation.id, {
+                operationId: operation.id,
+                x: operation.x,
+                y: operation.y,
+            });
+    }
+    renderCanvas();
+    for (const operation of activeOperations) settleCombination(operation);
     if (!resultPopover.hidden && resultAnchor)
         positionResult(resultAnchor.x, resultAnchor.y);
 });
