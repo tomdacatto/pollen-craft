@@ -15,8 +15,8 @@
     --mint-strong: #a8e6a2;
     --lime: #f5fabc;
     --lime-strong: #e8f372;
+    --yellow: #f7d774;
 }
-
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; height: 100dvh; overflow: hidden; }
 body {
@@ -210,48 +210,91 @@ button:disabled { cursor: wait; opacity: .55; }
     transform: scale(1.03);
 }
 .canvas-chip.is-combining {
-    opacity: .42;
+    opacity: 0;
+    visibility: hidden;
 }
 .canvas-chip[aria-disabled="true"] { cursor: wait; }
-.canvas-chip.pending-result {
-    background: var(--lime);
-    cursor: wait;
-    box-shadow: 2px 2px 0 var(--ink);
-    animation: none;
-}
 .canvas-chip.failure-result {
     background: var(--lavender);
 }
-.merge-clone {
+.merge-orbit {
     position: absolute;
-    margin: 0;
-    box-shadow: none !important;
-    pointer-events: none;
-    transition: transform .34s cubic-bezier(.2,.8,.25,1);
-    transform: translate(0, 0);
-}
-.merge-clone.is-moving { transform: translate(var(--merge-dx), var(--merge-dy)); }
-.merge-target-highlight {
-    position: absolute;
-    width: 60px;
-    height: 60px;
-    border: 4px solid var(--lime-strong);
-    border-radius: 50%;
-    box-shadow: 0 0 0 3px var(--lavender-strong);
-    opacity: .9;
+    width: 144px;
+    height: 134px;
     translate: -50% -50%;
-}
-.merge-burst {
-    position: absolute;
-    width: 18px;
-    height: 18px;
-    border: 3px solid var(--lime-strong);
-    border-radius: 50%;
-    background: var(--lavender-strong);
     pointer-events: none;
-    translate: -50% -50%;
-    animation: mergeBurst .11s ease-out forwards;
+    z-index: 7;
 }
+.merge-orbit-ring {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 92px;
+    height: 92px;
+    border: 2px dashed var(--lavender-strong);
+    border-radius: 50%;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--lime-strong) 34%, transparent);
+    translate: -50% -50%;
+    animation: mergeRingPulse 1.4s ease-in-out infinite;
+}
+.merge-orbit-token {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    border: 2px solid var(--ink);
+    border-radius: 50%;
+    background: var(--white);
+    box-shadow: 3px 3px 0 var(--ink);
+    transform: translate(-50%, -50%) rotate(var(--merge-angle)) translateX(var(--merge-radius));
+    animation: mergeTokenOrbit 2.5s linear infinite;
+}
+.merge-orbit-token[data-tone="lavender"] { background: var(--lavender); }
+.merge-orbit-token[data-tone="periwinkle"] { background: var(--periwinkle); }
+.merge-orbit-token[data-tone="mint"] { background: var(--mint); }
+.merge-orbit-token[data-tone="lime"] { background: var(--lime); }
+.merge-orbit-token .element-visual {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    font-size: 20px;
+}
+.merge-orbit-token .element-visual img { border-radius: 50%; }
+.merge-orbit-label {
+    position: absolute;
+    top: calc(50% + 58px);
+    left: 50%;
+    color: var(--ink);
+    font: 10px/1.2 "IBM Plex Mono", "Courier New", monospace;
+    white-space: nowrap;
+    translate: -50% 0;
+}
+.merge-orbit.is-resolving .merge-orbit-token {
+    animation: mergeTokenResolve .28s cubic-bezier(.2,.8,.25,1) forwards;
+}
+.merge-orbit.is-resolving .merge-orbit-ring {
+    animation: mergeRingResolve .28s ease-out forwards;
+}
+.merge-sparkle {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 8px;
+    height: 8px;
+    border: 1px solid var(--ink);
+    background: var(--lime-strong);
+    box-shadow: 1px 1px 0 var(--ink);
+    translate: -50% -50%;
+    animation: mergeSparkle .46s ease-out var(--sparkle-delay) forwards;
+}
+.merge-sparkle[data-sparkle-tone="lavender"] { background: var(--lavender-strong); }
+.merge-sparkle[data-sparkle-tone="yellow"] { background: var(--yellow); }
+.merge-sparkle[data-sparkle-tone="lime"] { background: var(--lime-strong); }
 .canvas-chip.is-new { animation: bloom .16s ease-out; }
 .element-visual {
     display: grid;
@@ -441,7 +484,14 @@ code { color: var(--ink); font-family: inherit; font-weight: 700; }
 .result-actions .plain-button:active { box-shadow: 0 0 0 var(--ink); }
 
 @keyframes bloom { from { opacity: 0; transform: scale(.9); } to { opacity: 1; transform: scale(1); } }
-@keyframes mergeBurst { from { opacity: .95; transform: scale(.65); } to { opacity: 0; transform: scale(2.4); } }
+@keyframes mergeTokenOrbit {
+    from { transform: translate(-50%, -50%) rotate(var(--merge-angle)) translateX(var(--merge-radius)); }
+    to { transform: translate(-50%, -50%) rotate(calc(var(--merge-angle) + 360deg)) translateX(var(--merge-radius)); }
+}
+@keyframes mergeRingPulse { 0%, 100% { opacity: .55; transform: translate(-50%, -50%) scale(.96); } 50% { opacity: .95; transform: translate(-50%, -50%) scale(1.03); } }
+@keyframes mergeTokenResolve { to { transform: translate(-50%, -50%) rotate(var(--merge-angle)) translateX(0) scale(.2); opacity: 0; } }
+@keyframes mergeRingResolve { to { opacity: 0; transform: translate(-50%, -50%) scale(.35); } }
+@keyframes mergeSparkle { from { opacity: 0; transform: translate(0, 0) scale(.3) rotate(0); } 25% { opacity: 1; } to { opacity: 0; transform: translate(var(--sparkle-x), var(--sparkle-y)) scale(1) rotate(45deg); } }
 @keyframes gardenSway {
     0%, 100% { translate: 0 0; }
     50% { translate: 3px -4px; }
@@ -450,7 +500,8 @@ code { color: var(--ink); font-family: inherit; font-weight: 700; }
 @media (prefers-reduced-motion: reduce) {
     .canvas-chip { transition: none; }
     .canvas-chip.is-dragging, .canvas-chip.is-drop-target { transform: none; }
-    .merge-clone, .merge-target-highlight, .merge-burst { transition: none; animation: none; opacity: 0; }
+    .merge-orbit-token, .merge-orbit-ring { animation: none; }
+    .merge-sparkle { animation: none; opacity: 0; }
     .garden-flower, .garden-pollen { animation: none; }
 }
 

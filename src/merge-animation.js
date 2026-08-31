@@ -1,4 +1,7 @@
-export const MERGE_VISUAL_DURATION_MS = 340;
+export const MERGE_MIN_WAIT_MS = 620;
+export const MERGE_RESOLVE_DURATION_MS = 280;
+export const MERGE_VISUAL_DURATION_MS =
+    MERGE_MIN_WAIT_MS + MERGE_RESOLVE_DURATION_MS;
 
 export function visualMidpoint(firstRect, secondRect, canvasRect) {
     return {
@@ -18,9 +21,38 @@ export function visualMidpoint(firstRect, secondRect, canvasRect) {
             canvasRect.top,
     };
 }
+export function getMergePhase({
+    apiState = "pending",
+    elapsedMs = 0,
+    reducedMotion = false,
+    minWaitMs = MERGE_MIN_WAIT_MS,
+} = {}) {
+    if (apiState === "failure" || apiState === "cancelled") return "idle";
+    if (apiState !== "success") return "waiting";
+    if (reducedMotion) return "complete";
+    return elapsedMs >= minWaitMs ? "resolving" : "waiting";
+}
+
+export function orbitPoint(center, index, total = 2, radius = 38) {
+    const angle = (Math.PI * 2 * index) / total - Math.PI / 2;
+    return {
+        x: center.x + Math.cos(angle) * radius,
+        y: center.y + Math.sin(angle) * radius,
+        angle: (angle * 180) / Math.PI,
+    };
+}
+
+export function sparklePoint(index, total = 8, radius = 52) {
+    const angle = (Math.PI * 2 * index) / total - Math.PI / 2;
+    const distance = radius + (index % 3) * 7;
+    return {
+        x: Math.cos(angle) * distance,
+        y: Math.sin(angle) * distance,
+    };
+}
 
 export function createMergeAnimationLifecycle({
-    duration = MERGE_VISUAL_DURATION_MS,
+    duration = MERGE_MIN_WAIT_MS,
     reducedMotion = false,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
@@ -32,7 +64,7 @@ export function createMergeAnimationLifecycle({
         operation.settled = true;
         if (operation.timer !== null) clearTimer(operation.timer);
         active.delete(operation.id);
-        operation.resolve(completed);
+        operation.settle(completed);
     }
 
     return {
@@ -46,7 +78,7 @@ export function createMergeAnimationLifecycle({
                 id,
                 timer: null,
                 settled: false,
-                resolve,
+                settle: resolve,
                 cancel() {
                     finish(operation, false);
                 },
@@ -71,15 +103,16 @@ export function createMergeAnimationLifecycle({
         },
     };
 }
-
 export function createMergeAnimation({
     canvas,
     layer,
-    duration = MERGE_VISUAL_DURATION_MS,
+    minWait = MERGE_MIN_WAIT_MS,
+    resolveDuration = MERGE_RESOLVE_DURATION_MS,
     reducedMotion = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)")
         .matches ?? false,
-    requestFrame = globalThis.requestAnimationFrame ??
-        ((callback) => setTimeout(callback, 0)),
+    now = () => performance.now(),
+    setTimer = setTimeout,
+    clearTimer = clearTimeout,
 } = {}) {
     const active = new Map();
 
@@ -91,22 +124,50 @@ export function createMergeAnimation({
     function finish(operation, completed) {
         if (operation.settled) return;
         operation.settled = true;
-        clearTimeout(operation.motionTimer);
-        clearTimeout(operation.burstTimer);
+        clearTimer(operation.waitTimer);
+        clearTimer(operation.resolveTimer);
         removeNodes(operation);
         active.delete(operation.id);
         if (completed) operation.onComplete?.();
-        operation.resolve(completed);
+        operation.settle(completed);
+    }
+
+    function appendSparkles(operation) {
+        const sparkleCount = 8;
+        for (let index = 0; index < sparkleCount; index += 1) {
+            const sparkle = document.createElement("span");
+            sparkle.className = "merge-sparkle";
+            sparkle.setAttribute("aria-hidden", "true");
+            const point = sparklePoint(index, sparkleCount);
+            sparkle.style.setProperty("--sparkle-x", `${point.x}px`);
+            sparkle.style.setProperty("--sparkle-y", `${point.y}px`);
+            sparkle.style.setProperty("--sparkle-delay", `${index * 18}ms`);
+            sparkle.dataset.sparkleTone =
+                index % 3 === 0 ? "yellow" : index % 2 ? "lavender" : "lime";
+            layer.append(sparkle);
+            operation.nodes.push(sparkle);
+        }
+    }
+
+    function beginResolve(operation) {
+        if (operation.settled || operation.phase !== "waiting") return;
+        operation.phase = "resolving";
+        operation.waitTimer = null;
+        if (reducedMotion) {
+            finish(operation, true);
+            return;
+        }
+        operation.orbit.classList.remove("is-orbiting");
+        operation.orbit.classList.add("is-resolving");
+        appendSparkles(operation);
+        operation.resolveTimer = setTimer(
+            () => finish(operation, true),
+            resolveDuration,
+        );
     }
 
     return {
-        begin({
-            id,
-            sourceElements,
-            targetElement = sourceElements[1],
-            topmostSourceId,
-            onComplete,
-        } = {}) {
+        begin({ id, sourceElements = [], onComplete } = {}) {
             active.get(id)?.cancel();
             let resolve;
             const promise = new Promise((next) => {
@@ -115,10 +176,13 @@ export function createMergeAnimation({
             const operation = {
                 id,
                 nodes: [],
-                motionTimer: null,
-                burstTimer: null,
+                orbit: null,
+                waitTimer: null,
+                resolveTimer: null,
+                startedAt: now(),
+                phase: "waiting",
                 settled: false,
-                resolve,
+                settle: resolve,
                 onComplete,
                 cancel() {
                     finish(operation, false);
@@ -134,78 +198,67 @@ export function createMergeAnimation({
                 canvasRect && sourceRects.length >= 2
                     ? visualMidpoint(sourceRects[0], sourceRects[1], canvasRect)
                     : null;
-            if (reducedMotion || sourceElements.length < 2) {
+            if (!midpoint || !layer) {
                 queueMicrotask(() => finish(operation, true));
-                return {
-                    promise,
-                    cancel: operation.cancel,
-                    midpoint,
-                };
+                return { promise, cancel: operation.cancel, midpoint };
             }
 
+            const orbit = document.createElement("span");
+            orbit.className = "merge-orbit is-orbiting";
+            orbit.setAttribute("aria-hidden", "true");
+            orbit.style.left = `${midpoint.x}px`;
+            orbit.style.top = `${midpoint.y}px`;
+            const ring = document.createElement("span");
+            ring.className = "merge-orbit-ring";
+            orbit.append(ring);
             for (const [index, source] of sourceElements.entries()) {
-                const rect = sourceRects[index];
-                const clone = source.cloneNode(true);
-                clone.className = "merge-clone canvas-chip";
-                clone.classList.remove(
-                    "is-combining",
-                    "is-dragging",
-                    "is-drop-target",
-                );
-                clone.setAttribute("aria-hidden", "true");
-                clone.removeAttribute("aria-label");
-                clone.removeAttribute("aria-busy");
-                clone.removeAttribute("aria-disabled");
-                clone.style.left = `${rect.left - canvasRect.left}px`;
-                clone.style.top = `${rect.top - canvasRect.top}px`;
-                clone.style.width = `${rect.width}px`;
-                clone.style.height = `${rect.height}px`;
-                clone.style.zIndex =
-                    source.dataset.instance === topmostSourceId ? "6" : "5";
-                clone.style.setProperty(
-                    "--merge-dx",
-                    `${midpoint.x - (rect.left - canvasRect.left + rect.width / 2)}px`,
-                );
-                clone.style.setProperty(
-                    "--merge-dy",
-                    `${midpoint.y - (rect.top - canvasRect.top + rect.height / 2)}px`,
-                );
-                layer.append(clone);
-                operation.nodes.push(clone);
+                const token = document.createElement("span");
+                token.className = "merge-orbit-token";
+                token.dataset.tone = source.dataset.tone ?? "lime";
+                const visual = source.querySelector(".element-visual");
+                if (visual) {
+                    const icon = visual.cloneNode(true);
+                    icon.setAttribute("aria-hidden", "true");
+                    token.append(icon);
+                } else token.textContent = "✦";
+                const point = orbitPoint({ x: 0, y: 0 }, index);
+                token.style.setProperty("--merge-angle", `${point.angle}deg`);
+                token.style.setProperty("--merge-radius", "38px");
+                orbit.append(token);
             }
-            const highlight = document.createElement("span");
-            highlight.className = "merge-target-highlight";
-            highlight.setAttribute("aria-hidden", "true");
-            const targetRect =
-                targetElement?.getBoundingClientRect?.() ?? sourceRects[1];
-            highlight.style.left = `${targetRect.left + targetRect.width / 2 - canvasRect.left}px`;
-            highlight.style.top = `${targetRect.top + targetRect.height / 2 - canvasRect.top}px`;
-            layer.append(highlight);
-            operation.nodes.push(highlight);
-
-            requestFrame(() => {
-                if (operation.settled) return;
-                for (const node of operation.nodes)
-                    node.classList.add("is-moving");
-            });
-            operation.burstTimer = setTimeout(
-                () => {
-                    if (operation.settled) return;
-                    const burst = document.createElement("span");
-                    burst.className = "merge-burst";
-                    burst.setAttribute("aria-hidden", "true");
-                    burst.style.left = `${midpoint.x}px`;
-                    burst.style.top = `${midpoint.y}px`;
-                    layer.append(burst);
-                    operation.nodes.push(burst);
+            const label = document.createElement("span");
+            label.className = "merge-orbit-label";
+            label.textContent = "Combining…";
+            orbit.append(label);
+            layer.append(orbit);
+            operation.orbit = orbit;
+            operation.nodes.push(orbit);
+            return {
+                promise,
+                cancel: operation.cancel,
+                midpoint,
+                requestResolve: () => {
+                    if (operation.settled || operation.phase !== "waiting")
+                        return false;
+                    const elapsed = now() - operation.startedAt;
+                    const wait = reducedMotion
+                        ? 0
+                        : Math.max(0, minWait - elapsed);
+                    clearTimer(operation.waitTimer);
+                    if (reducedMotion)
+                        queueMicrotask(() => beginResolve(operation));
+                    else
+                        operation.waitTimer = setTimer(
+                            () => beginResolve(operation),
+                            wait,
+                        );
+                    return true;
                 },
-                Math.max(0, duration - 110),
-            );
-            operation.motionTimer = setTimeout(
-                () => finish(operation, true),
-                duration,
-            );
-            return { promise, cancel: operation.cancel, midpoint };
+            };
+        },
+        resolve(id) {
+            const operation = active.get(id);
+            return operation?.requestResolve?.() ?? false;
         },
         cancel(id) {
             active.get(id)?.cancel();

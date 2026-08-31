@@ -92,7 +92,6 @@ const mergeAnimation = createMergeAnimation({
     canvas,
     layer: mergeLayer,
 });
-const pendingResults = new Map();
 const failedResults = new Map();
 const imageFailures = new Map();
 const imageAnchors = new Map();
@@ -656,7 +655,6 @@ function releaseCombination(
     combinationOperations.finish(operation, {
         preserveSources: preserveSourceIds,
     });
-    pendingResults.delete(operation.id);
     setTextBusy(combinationOperations.size > 0);
     if (render) renderCanvas();
 }
@@ -664,37 +662,14 @@ function cancelCombinationOperation(operation) {
     if (!operation || !combinationOperations.get(operation.id)) return;
     combinationOperations.cancel(operation);
     mergeAnimation.cancel(operation.id);
-    pendingResults.delete(operation.id);
     setTextBusy(combinationOperations.size > 0);
     renderCanvas();
 }
 function cancelAllCombinationOperations() {
     for (const operation of combinationOperations.cancelAll())
         mergeAnimation.cancel(operation.id);
-    pendingResults.clear();
     setTextBusy(combinationOperations.size > 0);
     renderCanvas();
-}
-function renderPendingResult(pending) {
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "canvas-chip pending-result";
-    chip.dataset.tone = "lime";
-    chip.dataset.pending = String(pending.operationId);
-    chip.style.width = "160px";
-    const point = positionAtCanvasCenter(pending.x, pending.y, 160, 44);
-    chip.style.left = `${point.x}px`;
-    chip.style.top = `${point.y}px`;
-    chip.setAttribute("aria-busy", "true");
-    chip.setAttribute("aria-label", "Combining ingredients, result loading");
-    chip.disabled = true;
-    const visual = document.createElement("span");
-    visual.className = "element-visual is-placeholder";
-    visual.setAttribute("aria-hidden", "true");
-    const label = document.createElement("span");
-    label.textContent = "Combining…";
-    chip.append(visual, label);
-    canvasItems.append(chip);
 }
 function renderFailureResult(failure) {
     const chip = document.createElement("button");
@@ -788,7 +763,6 @@ function renderCanvas(newId = null) {
         chip.style.left = `${point.x}px`;
         chip.style.top = `${point.y}px`;
     }
-    for (const pending of pendingResults.values()) renderPendingResult(pending);
     for (const failure of failedResults.values()) renderFailureResult(failure);
     for (const failure of imageFailures.values())
         if (!failedResults.has(failure.id)) renderFailureResult(failure);
@@ -886,19 +860,38 @@ function failCombination(operation) {
         );
     renderCanvas();
 }
+function beginMergeVisual(operation) {
+    const sourceElements = operation.sourceIds
+        .map((id) => canvasItems.querySelector(`[data-instance="${id}"]`))
+        .filter(Boolean);
+    const visual = mergeAnimation.begin({
+        id: operation.id,
+        sourceElements,
+        onComplete: () => {
+            if (!operationIsCurrent(operation)) return;
+            operation.visualReady = true;
+            settleCombination(operation);
+        },
+    });
+    if (visual.midpoint) {
+        operation.x = visual.midpoint.x;
+        operation.y = visual.midpoint.y;
+    }
+    return visual;
+}
 function settleCombination(operation) {
-    if (!operationIsCurrent(operation) || !operation.visualReady) return;
-    if (operation.apiState === "pending") {
-        pendingResults.set(operation.id, {
-            operationId: operation.id,
-            x: operation.x,
-            y: operation.y,
-        });
-        renderCanvas();
+    if (!operationIsCurrent(operation)) return;
+    if (operation.apiState === "pending") return;
+    if (operation.apiState === "failure") {
+        mergeAnimation.cancel(operation.id);
+        failCombination(operation);
         return;
     }
-    if (operation.apiState === "failure") failCombination(operation);
-    else if (operation.apiState === "success") commitCombination(operation);
+    if (!operation.visualReady) {
+        mergeAnimation.resolve(operation.id);
+        return;
+    }
+    if (operation.apiState === "success") commitCombination(operation);
 }
 function renderInventory() {
     const query = displayNameKey(search.value);
@@ -1437,24 +1430,7 @@ function startCombination({
     if (resultPopover.hidden) resultPopover.setAttribute("aria-busy", "false");
     setTextBusy(combinationOperations.size > 0);
     renderCanvas();
-    const sourceElements = operation.sourceIds
-        .map((id) => canvasItems.querySelector(`[data-instance="${id}"]`))
-        .filter(Boolean);
-    const visual = mergeAnimation.begin({
-        id: operation.id,
-        sourceElements,
-        targetElement: sourceElements[1],
-        topmostSourceId: operation.topmostSourceId,
-        onComplete: () => {
-            if (!operationIsCurrent(operation)) return;
-            operation.visualReady = true;
-            settleCombination(operation);
-        },
-    });
-    if (visual.midpoint) {
-        operation.x = visual.midpoint.x;
-        operation.y = visual.midpoint.y;
-    }
+    beginMergeVisual(operation);
     announce(`Combining ${firstItem.name} + ${secondItem.name}`);
     (async () => {
         try {
@@ -2109,13 +2085,8 @@ globalThis.addEventListener("resize", () => {
             operation.x = midpoint.x;
             operation.y = midpoint.y;
         }
-        operation.visualReady = true;
-        if (operation.apiState === "pending")
-            pendingResults.set(operation.id, {
-                operationId: operation.id,
-                x: operation.x,
-                y: operation.y,
-            });
+        operation.visualReady = false;
+        beginMergeVisual(operation);
     }
     renderCanvas();
     for (const operation of activeOperations) settleCombination(operation);

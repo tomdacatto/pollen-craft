@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
     createMergeAnimationLifecycle,
+    getMergePhase,
+    orbitPoint,
+    sparklePoint,
     visualMidpoint,
 } from "./merge-animation.js";
 
@@ -105,4 +108,44 @@ test("resize rebases two active merge anchors independently", () => {
     assert.deepEqual(anchors.get("pending"), { x: 170, y: 67 });
     assert.deepEqual(anchors.get("result"), { x: 240, y: 242 });
     assert.notDeepEqual(anchors.get("pending"), anchors.get("result"));
+});
+
+test("merge phase keeps fast responses waiting and slow responses resolving", () => {
+    assert.equal(
+        getMergePhase({ apiState: "pending", elapsedMs: 10 }),
+        "waiting",
+    );
+    assert.equal(
+        getMergePhase({ apiState: "success", elapsedMs: 300 }),
+        "waiting",
+    );
+    assert.equal(
+        getMergePhase({ apiState: "success", elapsedMs: 620 }),
+        "resolving",
+    );
+    assert.equal(
+        getMergePhase({ apiState: "failure", elapsedMs: 620 }),
+        "idle",
+    );
+});
+
+test("orbit and sparkle geometry is deterministic and operation-safe", () => {
+    const first = orbitPoint({ x: 100, y: 80 }, 0);
+    const second = orbitPoint({ x: 100, y: 80 }, 1);
+    assert.deepEqual(first, { x: 100, y: 42, angle: -90 });
+    assert.deepEqual(second, { x: 100, y: 118, angle: 90 });
+    assert.ok(Math.abs(sparklePoint(0, 8).x) < 1e-9);
+    assert.equal(sparklePoint(0, 8).y, -52);
+    assert.equal(new Set([first.angle, second.angle]).size, 2);
+});
+
+test("reduced motion completes immediately without an orbit phase", () => {
+    assert.equal(
+        getMergePhase({
+            apiState: "success",
+            elapsedMs: 0,
+            reducedMotion: true,
+        }),
+        "complete",
+    );
 });
