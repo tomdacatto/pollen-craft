@@ -25,6 +25,7 @@ export const OAUTH_MAX_CALLBACK_PARAM_LENGTH = 512;
 export const OAUTH_MAX_TOKEN_RESPONSE_BYTES = 16 * 1024;
 export const OAUTH_MAX_PENDING_BYTES = 4 * 1024;
 export const OAUTH_MAX_EXPIRES_IN_SECONDS = 31_536_000;
+export const OAUTH_TOP_LEVEL_CONNECT_HASH = "#connect-wallet";
 
 const AUTH_PARAM_NAMES = Object.freeze([
     "code",
@@ -70,6 +71,8 @@ export const OAUTH_ERROR_MESSAGES = Object.freeze({
         "Pollinations returned an invalid wallet token. Try again.",
     OAUTH_TOKEN_STORAGE:
         "The wallet token could not be saved in this tab. Try again.",
+    OAUTH_POPUP_BLOCKED:
+        "Your browser blocked the wallet tab. Allow pop-ups and try again.",
 });
 
 export class OAuthError extends Error {
@@ -261,6 +264,31 @@ export function redirectUriForLocation(locationLike = globalThis.location) {
 }
 
 export const getRedirectUri = redirectUriForLocation;
+
+export function topLevelConnectUrl(locationLike = globalThis.location) {
+    const url = new URL(redirectUriForLocation(locationLike));
+    url.hash = OAUTH_TOP_LEVEL_CONNECT_HASH;
+    return url.toString();
+}
+
+export function consumeTopLevelConnectRequest({
+    location = globalThis.location,
+    history = globalThis.history,
+} = {}) {
+    let url;
+    try {
+        url = locationToUrl(location);
+    } catch {
+        return false;
+    }
+    if (url.hash !== OAUTH_TOP_LEVEL_CONNECT_HASH) return false;
+    redirectUriForLocation(url);
+    if (!history || typeof history.replaceState !== "function")
+        throw oauthError("OAUTH_CALLBACK_INVALID");
+    url.hash = "";
+    history.replaceState({}, "", `${url.pathname}${url.search}`);
+    return true;
+}
 
 function isValidPendingShape(record) {
     return (

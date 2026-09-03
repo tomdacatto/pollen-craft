@@ -1925,6 +1925,24 @@ async function connectWallet() {
     authBusy = true;
     renderAuthState();
     try {
+        if (globalThis.self !== globalThis.top) {
+            const walletTab = globalThis.open(
+                oauth.topLevelConnectUrl(),
+                "_blank",
+            );
+            if (!walletTab) throw new OAuthError("OAUTH_POPUP_BLOCKED");
+            try {
+                walletTab.opener = null;
+            } catch {
+                // Cross-origin navigation may sever the opener first.
+            }
+            authBusy = false;
+            authStatusMessage =
+                "Wallet sign-in opened in a new tab. Continue there.";
+            renderAuthState();
+            announce("Wallet sign-in opened in a new tab.");
+            return;
+        }
         const result = await oauth.begin();
         globalThis.location.assign(result.authorizationUrl);
     } catch (error) {
@@ -1945,22 +1963,24 @@ async function processOAuthCallback() {
         authBusy = false;
         if (result.kind === "none") {
             renderAuthState();
-            return;
+            return result;
         }
         if (result.kind === "success") {
             authStatusMessage = "";
             renderAuthState();
             announce("Pollinations wallet connected for this tab.");
-            return;
+            return result;
         }
         setAuthStatus(result.error);
         announce(`${result.error.code}: ${result.error.message}`);
+        return result;
     } catch {
         authBusy = false;
         setAuthStatus(new OAuthError("OAUTH_CALLBACK_INVALID"));
         announce(
             "OAUTH_CALLBACK_INVALID: The wallet callback was invalid. Connect again.",
         );
+        return { kind: "failure" };
     }
 }
 function disconnectWallet() {
@@ -2111,5 +2131,14 @@ renderCanvas();
 renderInventory();
 renderAuthState();
 queueMicrotask(() => {
-    void processOAuthCallback();
+    void (async () => {
+        const callback = await processOAuthCallback();
+        if (
+            callback?.kind === "none" &&
+            oauth.consumeTopLevelConnectRequest()
+        ) {
+            openSettings();
+            await connectWallet();
+        }
+    })();
 });
