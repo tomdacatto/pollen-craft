@@ -74,13 +74,21 @@ test("random PKCE values use 32 bytes and 43 URL-safe characters", () => {
     assert.match(value, /^[A-Za-z0-9_-]+$/u);
 });
 
-test("only exact production and local root redirects are accepted", () => {
+test("only exact deployed and local redirects are accepted", () => {
     assert.equal(
         redirectUriForLocation({
             origin: "https://pollen-craft.vercel.app",
             pathname: "/",
         }),
         "https://pollen-craft.vercel.app/",
+    );
+    assert.equal(
+        redirectUriForLocation({
+            origin: "https://html-classic.itch.zone",
+            pathname: "/html/19087637/index.html",
+            search: "?v=1788455933",
+        }),
+        "https://html-classic.itch.zone/html/19087637/index.html",
     );
     assert.equal(
         redirectUriForLocation({
@@ -94,6 +102,14 @@ test("only exact production and local root redirects are accepted", () => {
             redirectUriForLocation({
                 origin: "http://127.0.0.1:4173",
                 pathname: "/",
+            }),
+        { code: "OAUTH_ORIGIN_UNSUPPORTED" },
+    );
+    assert.throws(
+        () =>
+            redirectUriForLocation({
+                origin: "https://html-classic.itch.zone",
+                pathname: "/html/19087638/index.html",
             }),
         { code: "OAUTH_ORIGIN_UNSUPPORTED" },
     );

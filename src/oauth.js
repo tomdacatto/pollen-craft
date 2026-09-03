@@ -6,9 +6,12 @@ export const OAUTH_AUTHORIZE_ENDPOINT =
 export const OAUTH_TOKEN_ENDPOINT =
     "https://enter.pollinations.ai/api/oauth/token";
 export const OAUTH_PRODUCTION_REDIRECT_URI = "https://pollen-craft.vercel.app/";
+export const OAUTH_ITCH_REDIRECT_URI =
+    "https://html-classic.itch.zone/html/19087637/index.html";
 export const OAUTH_LOCAL_REDIRECT_URI = "http://localhost:4173/";
 export const OAUTH_REDIRECT_URIS = Object.freeze([
     OAUTH_PRODUCTION_REDIRECT_URI,
+    OAUTH_ITCH_REDIRECT_URI,
     OAUTH_LOCAL_REDIRECT_URI,
 ]);
 
