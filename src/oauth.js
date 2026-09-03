@@ -6,12 +6,10 @@ export const OAUTH_AUTHORIZE_ENDPOINT =
 export const OAUTH_TOKEN_ENDPOINT =
     "https://enter.pollinations.ai/api/oauth/token";
 export const OAUTH_PRODUCTION_REDIRECT_URI = "https://pollen-craft.vercel.app/";
-export const OAUTH_ITCH_REDIRECT_URI =
-    "https://html-classic.itch.zone/html/19087637/index.html";
+export const OAUTH_ITCH_ORIGIN = "https://html-classic.itch.zone";
 export const OAUTH_LOCAL_REDIRECT_URI = "http://localhost:4173/";
 export const OAUTH_REDIRECT_URIS = Object.freeze([
     OAUTH_PRODUCTION_REDIRECT_URI,
-    OAUTH_ITCH_REDIRECT_URI,
     OAUTH_LOCAL_REDIRECT_URI,
 ]);
 
@@ -233,6 +231,22 @@ function exactOriginPath(url) {
     return `${url.origin}${url.pathname}`;
 }
 
+function isAllowedRedirectUri(value) {
+    if (OAUTH_REDIRECT_URIS.includes(value)) return true;
+    let url;
+    try {
+        url = new URL(value);
+    } catch {
+        return false;
+    }
+    return (
+        url.origin === OAUTH_ITCH_ORIGIN &&
+        /^\/html\/[1-9]\d*\/index\.html$/u.test(url.pathname) &&
+        !url.search &&
+        !url.hash
+    );
+}
+
 export function redirectUriForLocation(locationLike = globalThis.location) {
     let url;
     try {
@@ -240,10 +254,9 @@ export function redirectUriForLocation(locationLike = globalThis.location) {
     } catch {
         throw oauthError("OAUTH_ORIGIN_UNSUPPORTED");
     }
-    const redirectUri = OAUTH_REDIRECT_URIS.find(
-        (candidate) => candidate === exactOriginPath(url),
-    );
-    if (!redirectUri) throw oauthError("OAUTH_ORIGIN_UNSUPPORTED");
+    const redirectUri = exactOriginPath(url);
+    if (!isAllowedRedirectUri(redirectUri))
+        throw oauthError("OAUTH_ORIGIN_UNSUPPORTED");
     return redirectUri;
 }
 
@@ -259,7 +272,7 @@ function isValidPendingShape(record) {
         isRandomValue(record.verifier) &&
         (record.codeChallenge === undefined ||
             isRandomValue(record.codeChallenge)) &&
-        OAUTH_REDIRECT_URIS.includes(record.redirectUri) &&
+        isAllowedRedirectUri(record.redirectUri) &&
         record.clientId === OAUTH_CLIENT_ID &&
         Number.isSafeInteger(record.createdAt) &&
         record.createdAt >= 0

@@ -92,6 +92,13 @@ test("only exact deployed and local redirects are accepted", () => {
     );
     assert.equal(
         redirectUriForLocation({
+            origin: "https://html-classic.itch.zone",
+            pathname: "/html/20000000/index.html",
+        }),
+        "https://html-classic.itch.zone/html/20000000/index.html",
+    );
+    assert.equal(
+        redirectUriForLocation({
             origin: "http://localhost:4173",
             pathname: "/",
         }),
@@ -109,7 +116,7 @@ test("only exact deployed and local redirects are accepted", () => {
         () =>
             redirectUriForLocation({
                 origin: "https://html-classic.itch.zone",
-                pathname: "/html/19087638/index.html",
+                pathname: "/html/not-an-upload/index.html",
             }),
         { code: "OAUTH_ORIGIN_UNSUPPORTED" },
     );
