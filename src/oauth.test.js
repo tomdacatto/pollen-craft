@@ -3,7 +3,6 @@ import test from "node:test";
 import {
     beginOAuth,
     cleanCallbackUrl,
-    consumeTopLevelConnectRequest,
     createPkceChallenge,
     createRandomValue,
     disconnectOAuth,
@@ -16,7 +15,6 @@ import {
     parseOAuthCallback,
     readOAuthToken,
     redirectUriForLocation,
-    topLevelConnectUrl,
 } from "./oauth.js";
 
 function makeStorage(initial = {}) {
@@ -129,39 +127,6 @@ test("only exact deployed and local redirects are accepted", () => {
                 pathname: "/nested",
             }),
         { code: "OAUTH_ORIGIN_UNSUPPORTED" },
-    );
-});
-
-test("itch wallet sign-in moves to a clean top-level game URL", () => {
-    assert.equal(
-        topLevelConnectUrl({
-            origin: "https://html-classic.itch.zone",
-            pathname: "/html/19087927/index.html",
-            search: "?v=1788456864",
-        }),
-        "https://html-classic.itch.zone/html/19087927/index.html#connect-wallet",
-    );
-    const calls = [];
-    assert.equal(
-        consumeTopLevelConnectRequest({
-            location:
-                "https://html-classic.itch.zone/html/19087927/index.html#connect-wallet",
-            history: {
-                replaceState(...args) {
-                    calls.push(args);
-                },
-            },
-        }),
-        true,
-    );
-    assert.deepEqual(calls, [[{}, "", "/html/19087927/index.html"]]);
-    assert.equal(
-        consumeTopLevelConnectRequest({
-            location:
-                "https://html-classic.itch.zone/html/19087927/index.html#other",
-            history: { replaceState: () => assert.fail("must not clean") },
-        }),
-        false,
     );
 });
 

@@ -6,6 +6,12 @@ import {
     TEXT_MODELS,
 } from "./api.js";
 import {
+    DEVICE_VERIFICATION_URI,
+    DeviceAuthError,
+    pollDeviceAuthorization,
+    requestDeviceAuthorization,
+} from "./device-auth.js";
+import {
     canonicalPair,
     createInitialState,
     displayNameKey,
@@ -25,7 +31,9 @@ import { createMergeAnimation, visualMidpoint } from "./merge-animation.js";
 import {
     createOAuthClient,
     initializeOAuthStorage,
+    OAUTH_ITCH_ORIGIN,
     OAuthError,
+    saveOAuthToken,
 } from "./oauth.js";
 import {
     createMergeOperationRegistry,
@@ -50,6 +58,10 @@ const live = document.querySelector("#live-region");
 const keyStatus = document.querySelector("#key-status");
 const connectButton = document.querySelector("#connect-wallet");
 const disconnectButton = document.querySelector("#disconnect-wallet");
+const deviceFlow = document.querySelector("#device-flow");
+const deviceCode = document.querySelector("#device-code");
+const deviceLink = document.querySelector("#device-link");
+const deviceCancel = document.querySelector("#device-cancel");
 const modelSelect = document.querySelector("#text-model");
 const settingsDialog = document.querySelector("#settings-dialog");
 const helpDialog = document.querySelector("#help-dialog");
@@ -74,6 +86,8 @@ let suppressInventoryChip = null;
 let inventoryClickReset = null;
 let authBusy = false;
 let authStatusMessage = "";
+let deviceAuthorization = null;
+let deviceController = null;
 let resetVersion = 0;
 let activeImagePair = null;
 let activeDiscovery = null;
@@ -432,7 +446,7 @@ function promptForKey() {
 }
 function setAuthStatus(error = null) {
     authStatusMessage =
-        error instanceof OAuthError
+        error instanceof OAuthError || error instanceof DeviceAuthError
             ? `${error.code}: ${error.message}`
             : error
               ? "Wallet connection could not be completed. Try again."
@@ -441,16 +455,23 @@ function setAuthStatus(error = null) {
 }
 function renderAuthState() {
     const connected = Boolean(getKey());
-    connectButton.hidden = connected;
+    const waitingForDevice = Boolean(deviceAuthorization && !connected);
+    connectButton.hidden = connected || waitingForDevice;
     disconnectButton.hidden = !connected;
     connectButton.disabled = authBusy;
     disconnectButton.disabled = authBusy;
+    deviceFlow.hidden = !waitingForDevice;
+    deviceCode.textContent = deviceAuthorization?.userCode ?? "";
+    deviceLink.href =
+        deviceAuthorization?.verificationUri ?? DEVICE_VERIFICATION_URI;
     connectButton.textContent = authBusy
         ? "Connecting…"
         : "Connect Pollinations wallet";
     keyStatus.classList.toggle("is-ready", connected && !authStatusMessage);
     keyStatus.textContent = authBusy
-        ? "Connecting to Pollinations…"
+        ? waitingForDevice
+            ? "Waiting for approval in the Pollinations tab…"
+            : "Creating a secure wallet code…"
         : authStatusMessage ||
           (connected
               ? "Connected for this browser tab."
@@ -1925,31 +1946,57 @@ async function connectWallet() {
     authBusy = true;
     renderAuthState();
     try {
-        if (globalThis.self !== globalThis.top) {
-            const walletTab = globalThis.open(
-                oauth.topLevelConnectUrl(),
-                "_blank",
-            );
-            if (!walletTab) throw new OAuthError("OAUTH_POPUP_BLOCKED");
+        if (globalThis.location.origin === OAUTH_ITCH_ORIGIN) {
+            const controller = new AbortController();
+            deviceController = controller;
+            let walletTab = null;
             try {
-                walletTab.opener = null;
+                walletTab = globalThis.open(DEVICE_VERIFICATION_URI, "_blank");
+                if (walletTab) walletTab.opener = null;
             } catch {
-                // Cross-origin navigation may sever the opener first.
+                // The visible authorization link remains available.
             }
-            authBusy = false;
-            authStatusMessage =
-                "Wallet sign-in opened in a new tab. Continue there.";
+            const authorization = await requestDeviceAuthorization({
+                signal: controller.signal,
+            });
+            if (deviceController !== controller) return;
+            deviceAuthorization = authorization;
             renderAuthState();
-            announce("Wallet sign-in opened in a new tab.");
+            announce(`Authorize wallet code ${authorization.userCode}.`);
+            try {
+                if (walletTab)
+                    walletTab.location.href = authorization.verificationUri;
+            } catch {
+                // The visible authorization link remains available.
+            }
+            const token = await pollDeviceAuthorization(authorization, {
+                signal: controller.signal,
+            });
+            if (deviceController !== controller) return;
+            saveOAuthToken(tabStore, token);
+            deviceController = null;
+            deviceAuthorization = null;
+            authBusy = false;
+            authStatusMessage = "";
+            renderAuthState();
+            announce("Pollinations wallet connected for this game tab.");
             return;
         }
         const result = await oauth.begin();
         globalThis.location.assign(result.authorizationUrl);
     } catch (error) {
+        if (
+            deviceController?.signal.aborted ||
+            (error instanceof DeviceAuthError &&
+                error.code === "DEVICE_CANCELLED")
+        )
+            return;
+        deviceController = null;
+        deviceAuthorization = null;
         authBusy = false;
         setAuthStatus(error);
         announce(
-            error instanceof OAuthError
+            error instanceof OAuthError || error instanceof DeviceAuthError
                 ? `${error.code}: ${error.message}`
                 : "Wallet connection could not be started. Try again.",
         );
@@ -1986,6 +2033,9 @@ async function processOAuthCallback() {
 function disconnectWallet() {
     if (authBusy) return;
     invalidateAuthOperations();
+    deviceController?.abort();
+    deviceController = null;
+    deviceAuthorization = null;
     oauth.disconnect();
     authStatusMessage = "";
     renderAuthState();
@@ -1993,6 +2043,15 @@ function disconnectWallet() {
 }
 connectButton.addEventListener("click", connectWallet);
 disconnectButton.addEventListener("click", disconnectWallet);
+deviceCancel.addEventListener("click", () => {
+    deviceController?.abort();
+    deviceController = null;
+    deviceAuthorization = null;
+    authBusy = false;
+    authStatusMessage = "";
+    renderAuthState();
+    announce("Wallet connection cancelled.");
+});
 document.querySelector("#result-close").addEventListener("click", closeResult);
 retryImage.addEventListener("click", () => {
     const boundImage = boundPopoverImage();
@@ -2114,6 +2173,8 @@ globalThis.addEventListener("resize", () => {
         positionResult(resultAnchor.x, resultAnchor.y);
 });
 globalThis.addEventListener("pagehide", () => {
+    deviceController?.abort();
+    deviceController = null;
     resetVersion += 1;
     cancelActiveDrags();
     cancelAllCombinationOperations();
@@ -2131,14 +2192,5 @@ renderCanvas();
 renderInventory();
 renderAuthState();
 queueMicrotask(() => {
-    void (async () => {
-        const callback = await processOAuthCallback();
-        if (
-            callback?.kind === "none" &&
-            oauth.consumeTopLevelConnectRequest()
-        ) {
-            openSettings();
-            await connectWallet();
-        }
-    })();
+    void processOAuthCallback();
 });

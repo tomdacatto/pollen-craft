@@ -47,8 +47,14 @@
       <div class="dialog-card">
         <button class="dialog-close" id="settings-close" aria-label="Close settings" type="button">×</button>
         <p class="inventory-kicker">Connection</p><h2 id="settings-title">Settings</h2>
-        <p class="dialog-copy">Connect your Pollinations wallet to generate discoveries. On itch, sign-in opens the game in a normal browser tab so GitHub can authorize it. The temporary connection stays in that tab only. No manual key is needed. Disconnect clears the tab; revoke an issued key in your Pollinations dashboard.</p>
+        <p class="dialog-copy">Connect your Pollinations wallet to generate discoveries. On itch, a device code appears here and Pollinations opens in a normal browser tab for approval. The temporary connection stays in this game tab only. No manual key is needed.</p>
         <div class="dialog-row"><button class="primary-button" id="connect-wallet" type="button">Connect Pollinations wallet</button><button class="plain-button" id="disconnect-wallet" type="button" hidden>Disconnect</button></div>
+        <section class="device-flow" id="device-flow" aria-labelledby="device-flow-title" hidden>
+          <p class="device-title" id="device-flow-title">Authorize this code</p>
+          <output class="device-code" id="device-code" aria-label="Wallet authorization code"></output>
+          <p class="dialog-copy">Approve the code in the Pollinations tab. If it did not open, use the button below.</p>
+          <div class="dialog-row"><a class="primary-button" id="device-link" href="https://enter.pollinations.ai/device" target="_blank" rel="noopener">Open authorization</a><button class="plain-button" id="device-cancel" type="button">Cancel</button></div>
+        </section>
         <label for="text-model">Text model</label><select id="text-model" name="text-model"></select>
         <p class="dialog-copy">The selected model is used for new or failed discoveries. Saved recipes stay cached.</p>
         <p class="key-status" id="key-status" role="status" aria-live="polite">Not connected yet.</p>
